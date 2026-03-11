@@ -135,17 +135,17 @@ jobs:
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Check formatting
-        run: uv run ruff format . --check
+        run: uv run --no-sources ruff format . --check
 
       - name: Run linting
-        run: uv run ruff check .
+        run: uv run --no-sources ruff check .
 
       - name: Type check (strict)
-        run: uv run mypy ${{ inputs.mypy_targets }} --ignore-missing-imports ${{ inputs.mypy_strict && '--strict' || '' }}
+        run: uv run --no-sources mypy ${{ inputs.mypy_targets }} --ignore-missing-imports ${{ inputs.mypy_strict && '--strict' || '' }}
 
       - name: Type check (advisory)
         if: inputs.mypy_advisory_targets != ''
-        run: uv run mypy ${{ inputs.mypy_advisory_targets }} --ignore-missing-imports --strict || true
+        run: uv run --no-sources mypy ${{ inputs.mypy_advisory_targets }} --ignore-missing-imports --strict || true
 
       - name: Semgrep (architecture enforcement)
         if: inputs.semgrep_config != ''
@@ -228,7 +228,7 @@ jobs:
           echo "args=$ARGS" >> $GITHUB_OUTPUT
 
       - name: Run tests with coverage
-        run: uv run pytest ${{ steps.pytest-args.outputs.args }}
+        run: uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }}
 
       - name: Upload coverage
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
@@ -291,5 +291,5 @@ jobs:
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Run integration tests
-        run: uv run pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
+        run: uv run --no-sources pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
         continue-on-error: true
