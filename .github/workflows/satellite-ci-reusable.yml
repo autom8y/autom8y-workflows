@@ -130,7 +130,7 @@ jobs:
           echo "UV_INDEX_AUTOM8Y_PASSWORD=${{ steps.codeartifact.outputs.token }}" >> $GITHUB_ENV
 
       - name: Install dependencies
-        run: uv sync ${{ inputs.test_extras }}
+        run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Check formatting
         run: uv run ruff format . --check
@@ -198,7 +198,7 @@ jobs:
           echo '${{ inputs.test_env }}' >> $GITHUB_ENV
 
       - name: Install dependencies
-        run: uv sync ${{ inputs.test_extras }}
+        run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Build pytest arguments
         id: pytest-args
@@ -282,7 +282,7 @@ jobs:
           echo '${{ inputs.test_env }}' >> $GITHUB_ENV
 
       - name: Install dependencies
-        run: uv sync ${{ inputs.test_extras }}
+        run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Run integration tests
         run: uv run pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
