@@ -84,6 +84,18 @@ on:
         description: 'Semgrep config path (empty string to skip)'
         type: string
         default: ''
+      convention_check:
+        description: 'Run convention-check against spans emitted by instrumentation tests'
+        type: boolean
+        default: false
+      convention_check_test_filter:
+        description: 'pytest -k expression to select instrumentation tests for span collection (e.g., "instrumentation or telemetry")'
+        type: string
+        default: 'instrumentation or telemetry or otel'
+      convention_check_test_env:
+        description: 'Extra env vars for convention-check test run as KEY=VALUE lines (newline-separated)'
+        type: string
+        default: ''
 
 jobs:
   lint:
@@ -303,3 +315,127 @@ jobs:
       - name: Run integration tests
         run: uv run --no-sources pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
         continue-on-error: true
+
+  convention-check:
+    name: Convention Check
+    if: inputs.convention_check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      UV_NO_SOURCES: "1"
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.9.7"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Get CodeArtifact auth token
+        id: codeartifact
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain autom8y \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Configure uv for CodeArtifact
+        run: |
+          echo "UV_INDEX_AUTOM8Y_USERNAME=aws" >> $GITHUB_ENV
+          echo "UV_INDEX_AUTOM8Y_PASSWORD=${{ steps.codeartifact.outputs.token }}" >> $GITHUB_ENV
+
+      - name: Set test environment variables
+        if: inputs.convention_check_test_env != ''
+        run: |
+          echo '${{ inputs.convention_check_test_env }}' >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: uv sync --no-sources --all-extras
+
+      - name: Create span collector plugin
+        run: |
+          cat > _conftest_convention_ci.py << 'CONFTEST_EOF'
+          """CI-injected pytest plugin that collects spans from instrumentation tests.
+
+          Patches InMemorySpanExporter to accumulate all spans created across the
+          test session. At session end, dumps collected spans to spans.json for
+          validation by convention-check CLI.
+
+          This plugin is written inline by the CI job and is not checked in.
+          """
+          import json
+          from pathlib import Path
+
+          from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+          from autom8y_telemetry.conventions.checker import spans_to_json
+
+          _all_exporters: list[InMemorySpanExporter] = []
+          _orig_init = InMemorySpanExporter.__init__
+
+
+          def _tracking_init(self, *args, **kwargs):
+              _orig_init(self, *args, **kwargs)
+              _all_exporters.append(self)
+
+
+          InMemorySpanExporter.__init__ = _tracking_init
+
+
+          def pytest_sessionfinish(session, exitstatus):
+              """Collect spans from all InMemorySpanExporter instances and write to JSON."""
+              all_spans = []
+              for exporter in _all_exporters:
+                  try:
+                      all_spans.extend(exporter.get_finished_spans())
+                  except Exception:
+                      pass
+
+              if all_spans:
+                  Path("spans.json").write_text(spans_to_json(all_spans))
+              else:
+                  # Write empty spans file so convention-check has valid input
+                  Path("spans.json").write_text(json.dumps({"spans": []}))
+          CONFTEST_EOF
+
+      - name: Collect spans from instrumentation tests
+        env:
+          PYTHONPATH: "."
+        run: |
+          uv run --no-sources pytest tests/ \
+            -k '${{ inputs.convention_check_test_filter }}' \
+            -p _conftest_convention_ci \
+            --no-header -q \
+            --tb=no \
+            -m 'not integration' \
+            || true
+          if [ ! -f spans.json ]; then
+            echo "::error::No spans.json produced -- convention collector plugin failed"
+            exit 1
+          fi
+          SPAN_COUNT=$(uv run --no-sources python -c "import json; d=json.load(open('spans.json')); print(len(d.get('spans', [])))")
+          echo "Collected $SPAN_COUNT spans"
+          if [ "$SPAN_COUNT" -eq 0 ]; then
+            echo "::warning::No spans collected. Check convention_check_test_filter matches instrumentation tests that use InMemorySpanExporter."
+          fi
+
+      - name: Run convention-check
+        run: |
+          uv run --no-sources convention-check --spans spans.json
