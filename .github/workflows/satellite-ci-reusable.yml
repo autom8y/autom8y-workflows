@@ -440,12 +440,14 @@ jobs:
         run: |
           uv run --no-sources convention-check --spans spans.json --format json > check_result.json || true
           DOMAIN_VIOLATIONS=$(python3 -c "
-          import json, sys
+          import json
           data = json.load(open('check_result.json'))
-          vs = [v for v in data.get('violations', []) if v.get('type') != 'UNKNOWN_ATTRIBUTE']
+          # Filter out framework spans (no dots in name = not domain spans)
+          vs = [v for v in data.get('violations', [])
+                if '.' in v.get('span_name', '')]
           print(len(vs))
           ")
-          echo "Domain violations: $DOMAIN_VIOLATIONS (UNKNOWN_ATTRIBUTE filtered as framework spans)"
+          echo "Domain violations: $DOMAIN_VIOLATIONS (framework spans without dots filtered)"
           if [ "$DOMAIN_VIOLATIONS" -gt 0 ]; then
             echo "::error::Convention check found $DOMAIN_VIOLATIONS domain violations"
             uv run --no-sources convention-check --spans spans.json
