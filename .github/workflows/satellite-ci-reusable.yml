@@ -10,7 +10,7 @@
 #       permissions:
 #         id-token: write    # Required: OIDC for CodeArtifact
 #         contents: read
-#       uses: autom8y/autom8y/.github/workflows/satellite-ci-reusable.yml@main
+#       uses: autom8y/autom8y-workflows/.github/workflows/satellite-ci-reusable.yml@main
 #       with:
 #         mypy_targets: 'src/autom8_asana'
 #         coverage_package: 'autom8_asana'
