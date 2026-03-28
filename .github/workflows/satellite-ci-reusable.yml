@@ -210,8 +210,24 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.test_env != ''
+        env:
+          _TEST_ENV_INPUT: ${{ inputs.test_env }}
         run: |
-          echo '${{ inputs.test_env }}' >> $GITHUB_ENV
+          # Validate each line is KEY=VALUE with safe key name, reject protected vars
+          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
+              exit 1
+            fi
+            KEY="${line%%=*}"
+            if [[ "$KEY" =~ $DENYLIST ]]; then
+              echo "::error::test_env cannot override protected variable: $KEY"
+              exit 1
+            fi
+            echo "$line" >> $GITHUB_ENV
+          done <<< "$_TEST_ENV_INPUT"
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
@@ -306,8 +322,23 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.test_env != ''
+        env:
+          _TEST_ENV_INPUT: ${{ inputs.test_env }}
         run: |
-          echo '${{ inputs.test_env }}' >> $GITHUB_ENV
+          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
+              exit 1
+            fi
+            KEY="${line%%=*}"
+            if [[ "$KEY" =~ $DENYLIST ]]; then
+              echo "::error::test_env cannot override protected variable: $KEY"
+              exit 1
+            fi
+            echo "$line" >> $GITHUB_ENV
+          done <<< "$_TEST_ENV_INPUT"
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
@@ -364,8 +395,23 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.convention_check_test_env != ''
+        env:
+          _TEST_ENV_INPUT: ${{ inputs.convention_check_test_env }}
         run: |
-          echo '${{ inputs.convention_check_test_env }}' >> $GITHUB_ENV
+          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
+              exit 1
+            fi
+            KEY="${line%%=*}"
+            if [[ "$KEY" =~ $DENYLIST ]]; then
+              echo "::error::test_env cannot override protected variable: $KEY"
+              exit 1
+            fi
+            echo "$line" >> $GITHUB_ENV
+          done <<< "$_TEST_ENV_INPUT"
 
       - name: Install dependencies
         run: uv sync --no-sources --all-extras
