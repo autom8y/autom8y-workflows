@@ -97,6 +97,16 @@ on:
         type: string
         default: ''
 
+      # --- Optional: OpenAPI spec linting via Spectral ---
+      spectral_enabled:
+        description: 'Enable Spectral fleet ruleset validation for OpenAPI specs (opt-in)'
+        type: boolean
+        default: false
+      openapi_spec_path:
+        description: 'Path to the OpenAPI spec file (e.g., "docs/api-reference/openapi.json")'
+        type: string
+        default: ''
+
 jobs:
   lint:
     name: Lint & Type Check
@@ -509,3 +519,29 @@ jobs:
             exit 1
           fi
           echo "Convention check passed (framework spans excluded from failure gate)"
+
+  spectral-validation:
+    name: Spectral Fleet Validation
+    if: inputs.spectral_enabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Spectral CLI
+        run: npm install -g @stoplight/spectral-cli
+
+      - name: Fetch fleet ruleset
+        run: |
+          curl -sL \
+            https://raw.githubusercontent.com/autom8y/autom8y-api-schemas/main/spectral-fleet.yaml \
+            -o spectral-fleet.yaml
+
+      - name: Lint OpenAPI spec
+        run: |
+          if [ ! -f "${{ inputs.openapi_spec_path }}" ]; then
+            echo "::error::OpenAPI spec not found at ${{ inputs.openapi_spec_path }}"
+            exit 1
+          fi
+          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset spectral-fleet.yaml
