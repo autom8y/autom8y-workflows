@@ -344,8 +344,24 @@ jobs:
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
       - name: Run integration tests
+        id: integration-tests
         run: uv run --no-sources pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
         continue-on-error: true
+
+      - name: Report integration test results
+        if: always() && steps.integration-tests.outcome != 'skipped'
+        run: |
+          if [ "${{ steps.integration-tests.outcome }}" = "failure" ]; then
+            echo "## :x: Integration Tests FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Integration tests failed on \`${{ github.repository }}\` @ \`${{ github.sha }}\`." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The job reports success because \`continue-on-error: true\` is set." >> $GITHUB_STEP_SUMMARY
+            echo "Review the integration test logs above for failure details." >> $GITHUB_STEP_SUMMARY
+            echo "::warning title=Integration Tests Failed::Integration tests failed but were marked advisory (continue-on-error). Review logs for details."
+          else
+            echo "## :white_check_mark: Integration Tests Passed" >> $GITHUB_STEP_SUMMARY
+          fi
 
   convention-check:
     name: Convention Check
