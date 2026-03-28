@@ -1,0 +1,16 @@
+# Agent/tooling session artifacts
+.claude/
+.gemini/
+.knossos/
+.know/
+.mcp.json
+.sos/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
