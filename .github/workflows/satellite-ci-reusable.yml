@@ -530,14 +530,27 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Spectral CLI
-        run: npm install -g @stoplight/spectral-cli
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y-api-schemas
 
       - name: Fetch fleet ruleset
-        run: |
-          curl -sL \
-            https://raw.githubusercontent.com/autom8y/autom8y-api-schemas/main/spectral-fleet.yaml \
-            -o spectral-fleet.yaml
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: autom8y/autom8y-api-schemas
+          ref: main
+          path: .fleet-schemas
+          token: ${{ steps.app-token.outputs.token }}
+          sparse-checkout: spectral-fleet.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Install Spectral CLI
+        run: npm install -g @stoplight/spectral-cli
 
       - name: Lint OpenAPI spec
         run: |
@@ -545,4 +558,4 @@ jobs:
             echo "::error::OpenAPI spec not found at ${{ inputs.openapi_spec_path }}"
             exit 1
           fi
-          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset spectral-fleet.yaml
+          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset .fleet-schemas/spectral-fleet.yaml
