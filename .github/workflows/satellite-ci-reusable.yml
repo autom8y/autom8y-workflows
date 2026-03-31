@@ -107,6 +107,34 @@ on:
         type: string
         default: ''
 
+      # --- Optional: OpenAPI spec drift check ---
+      spec_check_enabled:
+        description: 'Enable OpenAPI spec drift check (runs generate_openapi.py --check)'
+        type: boolean
+        default: false
+      spec_check_env:
+        description: 'Env vars for spec-check as KEY=VALUE lines (e.g., "AUTOM8Y_ENV=test\nAUTH_DEV_MODE=true")'
+        type: string
+        default: ''
+      spec_check_extras:
+        description: 'uv sync arguments for spec-check job (e.g., "--extra api --extra analytics")'
+        type: string
+        default: '--all-extras'
+      spec_check_validate_script:
+        description: 'Optional post-generate validation script (e.g., "scripts/validate_openapi.py")'
+        type: string
+        default: ''
+
+      # --- Optional: Semantic score regression gate ---
+      semantic_score_enabled:
+        description: 'Enable semantic score regression gate for OpenAPI specs'
+        type: boolean
+        default: false
+      semantic_score_baseline:
+        description: 'Path to baseline JSON for regression detection'
+        type: string
+        default: '.ci/semantic-baseline.json'
+
 jobs:
   lint:
     name: Lint & Type Check
@@ -559,3 +587,154 @@ jobs:
             exit 1
           fi
           spectral lint "${{ inputs.openapi_spec_path }}" --ruleset .fleet-schemas/spectral-fleet.yaml
+
+  spec-check:
+    name: OpenAPI Spec Drift
+    if: inputs.spec_check_enabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.9.7"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Get CodeArtifact auth token
+        id: codeartifact
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain autom8y \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Configure uv for CodeArtifact
+        run: |
+          echo "UV_INDEX_AUTOM8Y_USERNAME=aws" >> $GITHUB_ENV
+          echo "UV_INDEX_AUTOM8Y_PASSWORD=${{ steps.codeartifact.outputs.token }}" >> $GITHUB_ENV
+
+      - name: Set spec-check environment variables
+        if: inputs.spec_check_env != ''
+        env:
+          _SPEC_CHECK_ENV_INPUT: ${{ inputs.spec_check_env }}
+        run: |
+          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::Invalid spec_check_env line (must be KEY=VALUE): $line"
+              exit 1
+            fi
+            KEY="${line%%=*}"
+            if [[ "$KEY" =~ $DENYLIST ]]; then
+              echo "::error::spec_check_env cannot override protected variable: $KEY"
+              exit 1
+            fi
+            echo "$line" >> $GITHUB_ENV
+          done <<< "$_SPEC_CHECK_ENV_INPUT"
+
+      - name: Install dependencies
+        run: uv sync --no-sources ${{ inputs.spec_check_extras }}
+
+      - name: Check OpenAPI spec drift
+        run: uv run --no-sources python scripts/generate_openapi.py --check
+
+      - name: Validate OpenAPI spec
+        if: inputs.spec_check_validate_script != ''
+        run: uv run --no-sources python ${{ inputs.spec_check_validate_script }}
+
+  semantic-score:
+    name: Semantic Score Gate
+    if: inputs.semantic_score_enabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: tools
+
+      - name: Fetch canonical semantic-score
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: autom8y/tools
+          ref: main
+          path: .tools-checkout
+          token: ${{ steps.app-token.outputs.token }}
+          sparse-checkout: semantic-score/score_spec.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Run semantic score gate
+        id: score
+        run: |
+          set -euo pipefail
+          python .tools-checkout/semantic-score/score_spec.py \
+            ${{ inputs.openapi_spec_path }} \
+            --baseline ${{ inputs.semantic_score_baseline }} \
+            | tee /tmp/score-result.json
+
+          COMPOSITE=$(python -c "import json; d=json.load(open('/tmp/score-result.json')); print(d['composite_score'])")
+          SAFE=$(python -c "import json; d=json.load(open('/tmp/score-result.json')); print(d.get('regression_safe', True))")
+          VIOLATIONS=$(python -c "import json; d=json.load(open('/tmp/score-result.json')); print(', '.join(d.get('floor_violations', [])) or 'none')")
+          REGRESSIONS=$(python -c "import json; d=json.load(open('/tmp/score-result.json')); regs=d.get('regressions', []); print(', '.join(r['metric'] + ' (' + str(r['delta']) + ')' for r in regs) or 'none')")
+          DELTA=$(python -c "import json; d=json.load(open('/tmp/score-result.json')); print(d.get('composite_delta', 'N/A'))")
+
+          echo "composite=$COMPOSITE" >> "$GITHUB_OUTPUT"
+          echo "regression_safe=$SAFE" >> "$GITHUB_OUTPUT"
+          echo "violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
+          echo "regressions=$REGRESSIONS" >> "$GITHUB_OUTPUT"
+          echo "delta=$DELTA" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'HEADER'
+          ## Semantic Score Gate
+
+          | Metric | Value |
+          |--------|-------|
+          HEADER
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          | Composite Score | ${{ steps.score.outputs.composite }} |
+          | Composite Delta | ${{ steps.score.outputs.delta }} |
+          | Regression Safe | ${{ steps.score.outputs.regression_safe }} |
+          | Regressions | ${{ steps.score.outputs.regressions }} |
+          | Floor Violations | ${{ steps.score.outputs.violations }} |
+          EOF
+
+          if [ "${{ steps.score.outputs.regression_safe }}" = "False" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> **BLOCKED**: Semantic regression detected. Fix the regressions above before merging." >> "$GITHUB_STEP_SUMMARY"
+          fi
