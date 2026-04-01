@@ -703,7 +703,7 @@ jobs:
           ref: main
           path: .tools-checkout
           token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: tools/semantic-score/score_spec.py
+          sparse-checkout: semantic-score/score_spec.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -715,7 +715,7 @@ jobs:
         id: score
         run: |
           set -euo pipefail
-          python .tools-checkout/tools/semantic-score/score_spec.py \
+          python .tools-checkout/semantic-score/score_spec.py \
             ${{ inputs.openapi_spec_path }} \
             --baseline ${{ inputs.semantic_score_baseline }} \
             | tee /tmp/score-result.json
