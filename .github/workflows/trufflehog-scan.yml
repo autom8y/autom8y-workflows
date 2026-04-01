@@ -1,0 +1,10 @@
+name: TruffleHog Secrets Scan (Scheduled)
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  trufflehog:
+    uses: ./.github/workflows/security-trufflehog.yml

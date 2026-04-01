@@ -1,0 +1,33 @@
+name: "Security: Gitleaks Secrets Scan"
+
+on:
+  workflow_call:
+
+jobs:
+  gitleaks:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=8.24.3
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz -C /usr/local/bin gitleaks
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose || true
+
+      - name: Upload SARIF
+        if: always() && github.event.repository.visibility == 'public'
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@45580472a5bb82c4681c4ac726cfdb60060c2ee1 # v3
+        with:
+          sarif_file: gitleaks-results.sarif
+          category: gitleaks

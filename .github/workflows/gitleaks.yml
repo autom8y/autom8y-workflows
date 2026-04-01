@@ -1,0 +1,11 @@
+name: Secrets Scan (Gitleaks)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  gitleaks:
+    uses: ./.github/workflows/security-gitleaks.yml

@@ -1,0 +1,9 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  dependency-review:
+    uses: ./.github/workflows/security-dependency-review.yml
