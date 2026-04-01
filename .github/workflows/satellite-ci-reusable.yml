@@ -694,16 +694,16 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: autom8y
-          repositories: tools
+          repositories: a8
 
       - name: Fetch canonical semantic-score
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: autom8y/tools
+          repository: autom8y/a8
           ref: main
           path: .tools-checkout
           token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: semantic-score/score_spec.py
+          sparse-checkout: tools/semantic-score/score_spec.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -715,7 +715,7 @@ jobs:
         id: score
         run: |
           set -euo pipefail
-          python .tools-checkout/semantic-score/score_spec.py \
+          python .tools-checkout/tools/semantic-score/score_spec.py \
             ${{ inputs.openapi_spec_path }} \
             --baseline ${{ inputs.semantic_score_baseline }} \
             | tee /tmp/score-result.json
