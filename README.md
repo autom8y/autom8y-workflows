@@ -16,7 +16,7 @@ jobs:
     permissions:
       id-token: write    # Required: OIDC for CodeArtifact
       contents: read
-    uses: autom8y/autom8y-workflows/.github/workflows/satellite-ci-reusable.yml@main
+    uses: autom8y/autom8y-workflows/.github/workflows/satellite-ci-reusable.yml@76a166219aa18e95b5bb0b57bf5075802f529c02 # v1.0.0
     with:
       mypy_targets: 'src/autom8_example'
       coverage_package: 'autom8_example'
