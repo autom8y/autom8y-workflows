@@ -14,3 +14,23 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+
+# KNOSSOS:START channel-ignores
+# Auto-managed by ari sync — channel directories are regenerated on every sync.
+# Each channel also has a provenance-driven .gitignore for per-file precision.
+.claude/
+.gemini/
+.mcp.json
+# KNOSSOS:END channel-ignores
+
+# KNOSSOS:START infra-ignores
+# Auto-managed by ari sync — knossos infrastructure directories.
+# Session state, internal framework state, and work product patterns.
+**/.sos/*
+!**/.sos/land/
+!**/.sos/land/**
+**/.ledge/*
+!**/.ledge/shelf/
+!**/.ledge/shelf/**
+**/.knossos/
+# KNOSSOS:END infra-ignores
