@@ -1,24 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended",
-    "helpers:pinGitHubActionDigests"
+    "github>autom8y/autom8y-workflows"
   ],
-  "labels": ["dependencies", "renovate"],
-  "commitMessagePrefix": "chore(deps):",
-  "prHourlyLimit": 2,
-  "prConcurrentLimit": 3,
-  "schedule": ["before 6am on Monday"],
-  "timezone": "America/New_York",
   "enabledManagers": [
     "github-actions"
-  ],
-  "packageRules": [
-    {
-      "description": "Pin GitHub Actions digests",
-      "matchManagers": ["github-actions"],
-      "pinDigests": true,
-      "automerge": false
-    }
   ]
 }
