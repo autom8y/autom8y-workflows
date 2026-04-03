@@ -1,0 +1,42 @@
+name: "Security: OpenSSF Scorecard"
+
+on:
+  workflow_call:
+    inputs:
+      publish_results:
+        description: 'Publish to OpenSSF API (public repos only, force-disabled for private)'
+        type: boolean
+        default: false
+
+jobs:
+  scorecard:
+    name: Scorecard Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write        # OIDC for publish_results
+      security-events: write # SARIF upload to Code Scanning
+      contents: read         # Checkout
+      actions: read          # Scorecard CI checks
+      issues: read           # GraphQL ListCommits (private repos)
+      pull-requests: read    # GraphQL ListCommits (private repos)
+      checks: read           # SAST tool detection
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: ${{ inputs.publish_results }}
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@45580472a5bb82c4681c4ac726cfdb60060c2ee1 # v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard
