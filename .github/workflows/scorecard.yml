@@ -1,0 +1,25 @@
+name: OpenSSF Scorecard
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# NOTE: No workflow-level permissions. The scorecard webapp rejects
+# workflow-level write permissions. All permissions are at job level.
+
+jobs:
+  scorecard:
+    permissions:
+      id-token: write
+      security-events: write
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: autom8y/autom8y-workflows/.github/workflows/security-scorecard.yml@c77acb0cf9e48b17f08180d54e24086016706856
+    with:
+      publish_results: true
