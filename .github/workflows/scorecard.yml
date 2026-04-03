@@ -22,4 +22,4 @@ jobs:
       checks: read
     uses: autom8y/autom8y-workflows/.github/workflows/security-scorecard.yml@c77acb0cf9e48b17f08180d54e24086016706856
     with:
-      publish_results: true
+      publish_results: false
