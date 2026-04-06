@@ -151,7 +151,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.9.7"
+          version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -216,7 +216,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.9.7"
+          version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -328,7 +328,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.9.7"
+          version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -417,7 +417,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.9.7"
+          version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -619,7 +619,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.9.7"
+          version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
