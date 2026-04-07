@@ -22,6 +22,18 @@
 
 name: Satellite CI
 
+# When this workflow is invoked from autom8y/sdk-publish-v2.yml's
+# consumer-gate job, the dispatch_correlation_id input is set; we surface
+# it in the run name so the consumer-gate's run-discovery loop (which
+# scans recent workflow_dispatch runs for the bracketed UUID) finds the
+# right run on the first or second poll.
+run-name: >-
+  ${{
+    inputs.dispatch_correlation_id != ''
+      && format('Satellite CI [candidate {0}@{1}] [{2}]', inputs.candidate_sdk_name, inputs.candidate_sdk_version, inputs.dispatch_correlation_id)
+      || 'Satellite CI'
+  }}
+
 on:
   workflow_call:
     inputs:
@@ -135,6 +147,32 @@ on:
         type: string
         default: '.ci/semantic-baseline.json'
 
+      # --- sdk-contract-governance Sprint 3: Consumer Validation Gate ---
+      # When invoked from autom8y/sdk-publish-v2.yml's consumer-gate job, the
+      # caller passes a candidate SDK wheel built from the publish-pipeline
+      # commit. This reusable workflow downloads that wheel via the parent
+      # workflow's run_id and force-reinstalls it BEFORE running tests so the
+      # satellite's existing test suite executes against the candidate
+      # behaviour, not the registry-pinned version. All four inputs are
+      # required to be passed together; if any one is missing the candidate
+      # path is skipped (normal CI continues unaffected).
+      candidate_sdk_name:
+        description: 'Distribution name of the candidate SDK (sdk-contract-governance Sprint 3)'
+        type: string
+        default: ''
+      candidate_sdk_version:
+        description: 'Candidate SDK version string for logging and the run name'
+        type: string
+        default: ''
+      candidate_wheel_run_id:
+        description: 'Workflow run ID that uploaded the candidate wheel artifact'
+        type: string
+        default: ''
+      dispatch_correlation_id:
+        description: 'Correlation UUID echoed into the job name so the gate can find this run'
+        type: string
+        default: ''
+
 jobs:
   lint:
     name: Lint & Type Check
@@ -183,6 +221,35 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
+
+      # sdk-contract-governance Sprint 3: when invoked by the consumer-gate
+      # the satellite must run its existing tests against a CANDIDATE SDK
+      # wheel, not the registry version. We download the wheel from the
+      # parent workflow run (autom8y/sdk-publish-v2.yml's consumer-gate
+      # job) and force-reinstall it into the venv. The download uses the
+      # GitHub App token already on the runner via secrets: inherit.
+      - name: Download candidate SDK wheel (consumer-gate)
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
+          path: _candidate-wheel
+          repository: autom8y/autom8y
+          run-id: ${{ inputs.candidate_wheel_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Force-install candidate SDK wheel (consumer-gate)
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        run: |
+          set -euo pipefail
+          ls -la _candidate-wheel/
+          CANDIDATE=$(find _candidate-wheel -name '*.whl' | head -n 1)
+          if [ -z "$CANDIDATE" ]; then
+            echo "::error::Consumer gate dispatched this run but no candidate wheel was found in the artifact"
+            exit 1
+          fi
+          echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
+          uv pip install --no-sources --force-reinstall "$CANDIDATE"
 
       - name: Check formatting
         run: uv run --no-sources ruff format . --check
@@ -269,6 +336,30 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
+
+      # sdk-contract-governance Sprint 3: see lint job for full rationale.
+      - name: Download candidate SDK wheel (consumer-gate)
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
+          path: _candidate-wheel
+          repository: autom8y/autom8y
+          run-id: ${{ inputs.candidate_wheel_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Force-install candidate SDK wheel (consumer-gate)
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        run: |
+          set -euo pipefail
+          ls -la _candidate-wheel/
+          CANDIDATE=$(find _candidate-wheel -name '*.whl' | head -n 1)
+          if [ -z "$CANDIDATE" ]; then
+            echo "::error::Consumer gate dispatched this run but no candidate wheel was found in the artifact"
+            exit 1
+          fi
+          echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
+          uv pip install --no-sources --force-reinstall "$CANDIDATE"
 
       - name: Build pytest arguments
         id: pytest-args
