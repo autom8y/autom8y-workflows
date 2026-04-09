@@ -109,6 +109,13 @@ on:
         type: string
         default: ''
 
+      # --- Optional: Configspec / Secretspec validation ---
+      run_configspec:
+        description: 'Run configspec/secretspec validation (default: true if spec files exist)'
+        required: false
+        type: string
+        default: 'true'
+
       # --- Optional: OpenAPI spec linting via Spectral ---
       spectral_enabled:
         description: 'Enable Spectral fleet ruleset validation for OpenAPI specs (opt-in)'
@@ -267,6 +274,25 @@ jobs:
       - name: Semgrep (architecture enforcement)
         if: inputs.semgrep_config != ''
         run: uv tool run semgrep scan --config ${{ inputs.semgrep_config }} --error src/
+
+      - name: Validate config spec
+        if: inputs.run_configspec != 'false'
+        run: |
+          EXIT=0
+          if [ -f "configspec.toml" ]; then
+            echo "::group::configspec validation"
+            uv run --no-sources python -m autom8y_config.specvalidator --configspec configspec.toml --verbose || EXIT=$?
+            echo "::endgroup::"
+          fi
+          if [ -f "secretspec.toml" ]; then
+            echo "::group::secretspec validation"
+            uv run --no-sources python -m autom8y_config.specvalidator --secretspec secretspec.toml --check-naming --verbose || EXIT=$?
+            echo "::endgroup::"
+          fi
+          if [ ! -f "configspec.toml" ] && [ ! -f "secretspec.toml" ]; then
+            echo "No configspec.toml or secretspec.toml found — skipping spec validation"
+          fi
+          exit $EXIT
 
   test:
     name: Test
