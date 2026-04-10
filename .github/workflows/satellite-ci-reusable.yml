@@ -80,6 +80,10 @@ on:
         description: 'Enable pytest-xdist parallel execution (-n auto)'
         type: boolean
         default: false
+      test_dist_strategy:
+        description: 'pytest-xdist --dist strategy (e.g., "loadscope", "loadfile", "worksteal"). Empty = xdist default.'
+        type: string
+        default: ''
       test_env:
         description: 'Extra env vars for test jobs as KEY=VALUE lines (newline-separated)'
         type: string
@@ -398,6 +402,11 @@ jobs:
           # Optional parallel execution
           if [ "${{ inputs.test_parallel }}" = "true" ]; then
             ARGS="$ARGS -n auto"
+          fi
+
+          # Optional xdist distribution strategy (only applied if non-empty)
+          if [ -n "${{ inputs.test_dist_strategy }}" ]; then
+            ARGS="$ARGS --dist=${{ inputs.test_dist_strategy }}"
           fi
 
           # Optional --ignore paths
