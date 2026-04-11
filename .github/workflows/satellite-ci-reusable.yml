@@ -84,6 +84,14 @@ on:
         description: 'pytest-xdist --dist strategy (e.g., "loadscope", "loadfile", "worksteal"). Empty = xdist default.'
         type: string
         default: ''
+      test_splits:
+        description: 'Number of pytest-split matrix shards for the test job (1 = disable sharding, default: 1)'
+        type: number
+        default: 1
+      test_durations_path:
+        description: 'Path to pytest-split durations file (relative to repo root); only used when test_splits > 1'
+        type: string
+        default: '.test_durations'
       test_env:
         description: 'Extra env vars for test jobs as KEY=VALUE lines (newline-separated)'
         type: string
@@ -298,13 +306,47 @@ jobs:
           fi
           exit $EXIT
 
+  # Sprint 2 (FR-1): Emits the matrix shard list for the `test` job. When
+  # `test_splits <= 1` (the default for every satellite except autom8y-data at
+  # the time of introduction), the list collapses to `[1]` and the `test` job
+  # runs exactly once with identical behaviour to the pre-sharding design. When
+  # `test_splits > 1`, `seq | jq` materializes a JSON integer array
+  # (e.g. `[1,2,3,4]`) since GitHub Actions' expression language has no
+  # `range()` primitive. Cost: one ~5-second prep job per invocation, amortized
+  # over the shard speedup whenever sharding is active.
+  matrix-prep:
+    name: Matrix Prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      shard_list: ${{ steps.build.outputs.shard_list }}
+    steps:
+      - name: Build shard list
+        id: build
+        env:
+          TEST_SPLITS: ${{ inputs.test_splits }}
+        run: |
+          set -euo pipefail
+          if [ "${TEST_SPLITS}" -le 1 ]; then
+            LIST='[1]'
+          else
+            LIST=$(seq 1 "${TEST_SPLITS}" | jq -R 'tonumber' | jq -s -c .)
+          fi
+          echo "shard_list=${LIST}" >> "$GITHUB_OUTPUT"
+          echo "Resolved shard list for test_splits=${TEST_SPLITS}: ${LIST}"
+
   test:
-    name: Test
+    needs: matrix-prep
+    name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       id-token: write
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list) }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -393,6 +435,10 @@ jobs:
 
       - name: Build pytest arguments
         id: pytest-args
+        env:
+          TEST_SPLITS: ${{ inputs.test_splits }}
+          MATRIX_SHARD: ${{ matrix.shard }}
+          TEST_DURATIONS_PATH: ${{ inputs.test_durations_path }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
@@ -409,6 +455,20 @@ jobs:
             ARGS="$ARGS --dist=${{ inputs.test_dist_strategy }}"
           fi
 
+          # Sprint 2 (FR-1): when test_splits > 1, partition the suite into
+          # `test_splits` groups via pytest-split least_duration bin-packing,
+          # and emit the trailing-tests duration table (FR-2, TDD §5.3) so the
+          # "Run tests" step can tee it into .pytest-shard-durations.txt for
+          # the durations artifact upload. When test_splits <= 1, no sharding
+          # flags are emitted so the pre-sprint-2 command line is preserved
+          # byte-for-byte.
+          if [ "${TEST_SPLITS}" -gt 1 ]; then
+            ARGS="$ARGS --splits=${TEST_SPLITS} --group=${MATRIX_SHARD}"
+            ARGS="$ARGS --splitting-algorithm=least_duration"
+            ARGS="$ARGS --durations-path=${TEST_DURATIONS_PATH}"
+            ARGS="$ARGS --durations=0 --durations-min=0"
+          fi
+
           # Optional --ignore paths
           IGNORE="${{ inputs.test_ignore }}"
           if [ -n "$IGNORE" ]; then
@@ -419,8 +479,36 @@ jobs:
 
           echo "args=$ARGS" >> $GITHUB_OUTPUT
 
+      # When sharding is disabled (test_splits <= 1) this runs the exact same
+      # command as before Sprint 2. When sharding is active, the pytest output
+      # is tee'd to .pytest-shard-durations.txt so the trailing --durations=0
+      # table can be published as a per-shard artifact (FR-2, TDD §5.3).
+      # `set -o pipefail` ensures a pytest failure is not masked by tee's
+      # exit 0.
       - name: Run tests with coverage
-        run: uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }}
+        shell: bash
+        env:
+          TEST_SPLITS: ${{ inputs.test_splits }}
+        run: |
+          set -o pipefail
+          if [ "${TEST_SPLITS}" -gt 1 ]; then
+            uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }} 2>&1 | tee .pytest-shard-durations.txt
+          else
+            uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }}
+          fi
+
+      # Sprint 2 (FR-2, NFR-2): publish per-shard pytest duration output so
+      # downstream tooling (durations-refresh weekly job, QA trailing-10-run
+      # review) can audit shard balance. Only uploaded when sharding is active
+      # to avoid polluting artifact storage for unaffected satellites.
+      - name: Upload shard durations
+        if: always() && inputs.test_splits > 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pytest-durations-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: .pytest-shard-durations.txt
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Upload coverage
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
