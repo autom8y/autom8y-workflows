@@ -317,6 +317,7 @@ jobs:
   matrix-prep:
     name: Matrix Prep
     runs-on: ubuntu-latest
+    permissions: {}
     timeout-minutes: 2
     outputs:
       shard_list: ${{ steps.build.outputs.shard_list }}
@@ -387,24 +388,10 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.test_env != ''
-        env:
-          _TEST_ENV_INPUT: ${{ inputs.test_env }}
-        run: |
-          # Validate each line is KEY=VALUE with safe key name, reject protected vars
-          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
-              exit 1
-            fi
-            KEY="${line%%=*}"
-            if [[ "$KEY" =~ $DENYLIST ]]; then
-              echo "::error::test_env cannot override protected variable: $KEY"
-              exit 1
-            fi
-            echo "$line" >> $GITHUB_ENV
-          done <<< "$_TEST_ENV_INPUT"
+        uses: ./.github/actions/validate-env-injection
+        with:
+          env-pairs: ${{ inputs.test_env }}
+          input-name: test_env
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
@@ -574,23 +561,10 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.test_env != ''
-        env:
-          _TEST_ENV_INPUT: ${{ inputs.test_env }}
-        run: |
-          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
-              exit 1
-            fi
-            KEY="${line%%=*}"
-            if [[ "$KEY" =~ $DENYLIST ]]; then
-              echo "::error::test_env cannot override protected variable: $KEY"
-              exit 1
-            fi
-            echo "$line" >> $GITHUB_ENV
-          done <<< "$_TEST_ENV_INPUT"
+        uses: ./.github/actions/validate-env-injection
+        with:
+          env-pairs: ${{ inputs.test_env }}
+          input-name: test_env
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
@@ -663,23 +637,10 @@ jobs:
 
       - name: Set test environment variables
         if: inputs.convention_check_test_env != ''
-        env:
-          _TEST_ENV_INPUT: ${{ inputs.convention_check_test_env }}
-        run: |
-          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-              echo "::error::Invalid test_env line (must be KEY=VALUE): $line"
-              exit 1
-            fi
-            KEY="${line%%=*}"
-            if [[ "$KEY" =~ $DENYLIST ]]; then
-              echo "::error::test_env cannot override protected variable: $KEY"
-              exit 1
-            fi
-            echo "$line" >> $GITHUB_ENV
-          done <<< "$_TEST_ENV_INPUT"
+        uses: ./.github/actions/validate-env-injection
+        with:
+          env-pairs: ${{ inputs.convention_check_test_env }}
+          input-name: convention_check_test_env
 
       - name: Install dependencies
         run: uv sync --no-sources --all-extras
@@ -860,23 +821,10 @@ jobs:
 
       - name: Set spec-check environment variables
         if: inputs.spec_check_env != ''
-        env:
-          _SPEC_CHECK_ENV_INPUT: ${{ inputs.spec_check_env }}
-        run: |
-          DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-              echo "::error::Invalid spec_check_env line (must be KEY=VALUE): $line"
-              exit 1
-            fi
-            KEY="${line%%=*}"
-            if [[ "$KEY" =~ $DENYLIST ]]; then
-              echo "::error::spec_check_env cannot override protected variable: $KEY"
-              exit 1
-            fi
-            echo "$line" >> $GITHUB_ENV
-          done <<< "$_SPEC_CHECK_ENV_INPUT"
+        uses: ./.github/actions/validate-env-injection
+        with:
+          env-pairs: ${{ inputs.spec_check_env }}
+          input-name: spec_check_env
 
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.spec_check_extras }}

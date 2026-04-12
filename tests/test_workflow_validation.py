@@ -22,6 +22,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 # SHA-pinned action ref pattern: owner/action@40-char-hex
 _SHA_REF_RE = re.compile(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+@[0-9a-f]{40}$")
@@ -62,6 +63,13 @@ def _all_reusable_workflow_paths() -> list[Path]:
         if triggers and "workflow_call" in triggers:
             reusable.append(path)
     return reusable
+
+
+def _all_template_paths() -> list[Path]:
+    """Collect all .yml.template workflow template files."""
+    if not TEMPLATES_DIR.exists():
+        return []
+    return sorted(TEMPLATES_DIR.glob("*.yml.template"))
 
 
 def _is_dispatcher_job(job_def: dict[str, Any]) -> bool:
@@ -122,10 +130,15 @@ def _extract_job_uses_refs(data: dict[str, Any]) -> list[tuple[str, str]]:
 
 ALL_WORKFLOWS = _all_workflow_paths()
 ALL_REUSABLE = _all_reusable_workflow_paths()
+ALL_TEMPLATES = _all_template_paths()
 
 
 def _wf_id(path: Path) -> str:
     return path.stem
+
+
+def _tmpl_id(path: Path) -> str:
+    return path.name.removesuffix(".yml.template")
 
 
 # ===========================================================================
@@ -492,3 +505,254 @@ class TestStructuralConventions:
         """There should be at least 6 reusable workflows (security + satellite CI)."""
         count = len(ALL_REUSABLE)
         assert count >= 6, f"Expected >=6 reusable workflows, found {count}"
+
+
+# ===========================================================================
+# 6. Conditional Job Structural Coverage
+# ===========================================================================
+
+# Maps each conditional job to its enabling input and expected if-condition fragment.
+_CONDITIONAL_JOBS: list[tuple[str, str, str]] = [
+    ("integration", "run_integration", "inputs.run_integration"),
+    ("convention-check", "convention_check", "inputs.convention_check"),
+    ("spectral-validation", "spectral_enabled", "inputs.spectral_enabled"),
+    ("spec-check", "spec_check_enabled", "inputs.spec_check_enabled"),
+    ("semantic-score", "semantic_score_enabled", "inputs.semantic_score_enabled"),
+]
+
+
+class TestConditionalJobs:
+    """Conditional jobs in satellite-ci-reusable must have correct gating and security."""
+
+    _SAT_PATH = WORKFLOWS_DIR / "satellite-ci-reusable.yml"
+
+    @pytest.fixture()
+    def sat_data(self) -> dict[str, Any]:
+        return _load_workflow(self._SAT_PATH)
+
+    @pytest.mark.parametrize(
+        "job_name,input_name,condition_fragment",
+        _CONDITIONAL_JOBS,
+        ids=[j[0] for j in _CONDITIONAL_JOBS],
+    )
+    def test_conditional_job_exists(
+        self, sat_data: dict[str, Any], job_name: str, input_name: str, condition_fragment: str
+    ) -> None:
+        """Each conditional job must exist in the workflow jobs dict."""
+        jobs = sat_data.get("jobs", {})
+        assert job_name in jobs, f"Job '{job_name}' not found in satellite-ci-reusable.yml"
+
+    @pytest.mark.parametrize(
+        "job_name,input_name,condition_fragment",
+        _CONDITIONAL_JOBS,
+        ids=[j[0] for j in _CONDITIONAL_JOBS],
+    )
+    def test_conditional_job_if_condition(
+        self, sat_data: dict[str, Any], job_name: str, input_name: str, condition_fragment: str
+    ) -> None:
+        """Each conditional job's if-condition must reference its enabling input."""
+        job_def = sat_data["jobs"][job_name]
+        if_cond = str(job_def.get("if", ""))
+        assert condition_fragment in if_cond, (
+            f"Job '{job_name}' if-condition '{if_cond}' does not reference '{condition_fragment}'"
+        )
+
+    @pytest.mark.parametrize(
+        "job_name,input_name,condition_fragment",
+        _CONDITIONAL_JOBS,
+        ids=[j[0] for j in _CONDITIONAL_JOBS],
+    )
+    def test_conditional_job_has_permissions(
+        self, sat_data: dict[str, Any], job_name: str, input_name: str, condition_fragment: str
+    ) -> None:
+        """Each conditional job must declare explicit permissions."""
+        job_def = sat_data["jobs"][job_name]
+        assert "permissions" in job_def, (
+            f"Job '{job_name}' missing permissions block"
+        )
+
+    @pytest.mark.parametrize(
+        "job_name,input_name,condition_fragment",
+        _CONDITIONAL_JOBS,
+        ids=[j[0] for j in _CONDITIONAL_JOBS],
+    )
+    def test_conditional_job_has_timeout(
+        self, sat_data: dict[str, Any], job_name: str, input_name: str, condition_fragment: str
+    ) -> None:
+        """Each conditional job must declare timeout-minutes."""
+        job_def = sat_data["jobs"][job_name]
+        assert "timeout-minutes" in job_def, (
+            f"Job '{job_name}' missing timeout-minutes"
+        )
+
+    @pytest.mark.parametrize(
+        "job_name,input_name,condition_fragment",
+        _CONDITIONAL_JOBS,
+        ids=[j[0] for j in _CONDITIONAL_JOBS],
+    )
+    def test_conditional_job_enabling_input_exists(
+        self, sat_data: dict[str, Any], job_name: str, input_name: str, condition_fragment: str
+    ) -> None:
+        """The enabling input referenced in if-condition must be declared."""
+        triggers = _get_triggers(sat_data)
+        assert triggers is not None
+        inputs = triggers["workflow_call"]["inputs"]
+        assert input_name in inputs, (
+            f"Input '{input_name}' for job '{job_name}' not declared in workflow_call inputs"
+        )
+
+    def test_env_injection_uses_composite_action(self, sat_data: dict[str, Any]) -> None:
+        """Jobs using env-injection validation must call the composite action, not inline."""
+        jobs = sat_data.get("jobs", {})
+        for job_name, job_def in jobs.items():
+            if not isinstance(job_def, dict):
+                continue
+            for step in job_def.get("steps", []):
+                if not isinstance(step, dict):
+                    continue
+                run_block = step.get("run", "")
+                assert "DENYLIST=" not in run_block, (
+                    f"Job '{job_name}' has inline DENYLIST — "
+                    "use ./.github/actions/validate-env-injection instead"
+                )
+
+
+# ===========================================================================
+# 7. DENYLIST / Env-Injection Composite Action Integrity
+# ===========================================================================
+
+_COMPOSITE_ACTION_PATH = (
+    Path(__file__).resolve().parent.parent
+    / ".github" / "actions" / "validate-env-injection" / "action.yml"
+)
+
+# Jobs that accept caller-supplied env pairs and must validate them.
+_ENV_INJECTION_JOBS = ["test", "integration", "convention-check", "spec-check"]
+
+
+class TestEnvInjectionCompositeAction:
+    """The validate-env-injection composite action must exist and be correctly wired."""
+
+    def test_composite_action_exists(self) -> None:
+        """The composite action YAML must exist."""
+        assert _COMPOSITE_ACTION_PATH.exists(), (
+            f"Composite action not found: {_COMPOSITE_ACTION_PATH}"
+        )
+
+    def test_composite_action_contains_denylist(self) -> None:
+        """The composite action must contain the DENYLIST security pattern."""
+        content = _COMPOSITE_ACTION_PATH.read_text()
+        assert "DENYLIST=" in content, "Composite action missing DENYLIST pattern"
+        assert "GITHUB_|ACTIONS_|RUNNER_|AWS_" in content, (
+            "DENYLIST missing expected protected prefixes"
+        )
+
+    def test_jobs_reference_composite_action(self) -> None:
+        """All env-injection jobs must have a step using the composite action."""
+        sat_path = WORKFLOWS_DIR / "satellite-ci-reusable.yml"
+        data = _load_workflow(sat_path)
+        jobs = data.get("jobs", {})
+
+        missing: list[str] = []
+        for job_name in _ENV_INJECTION_JOBS:
+            job_def = jobs.get(job_name, {})
+            steps = job_def.get("steps", [])
+            has_composite_call = any(
+                isinstance(s, dict)
+                and "./.github/actions/validate-env-injection" in str(s.get("uses", ""))
+                for s in steps
+            )
+            if not has_composite_call:
+                missing.append(job_name)
+
+        assert not missing, (
+            f"Jobs missing validate-env-injection composite action call: {missing}"
+        )
+
+
+# ===========================================================================
+# 8. Template Security Hardening
+# ===========================================================================
+
+
+class TestTemplateSecurityHardening:
+    """Workflow templates must follow the same security standards as workflows."""
+
+    @pytest.mark.parametrize("path", ALL_TEMPLATES, ids=_tmpl_id)
+    def test_template_checkout_uses_persist_credentials_false(self, path: Path) -> None:
+        """Template checkout steps must set persist-credentials: false."""
+        data = _load_workflow(path)
+        jobs = data.get("jobs", {})
+        if not isinstance(jobs, dict):
+            return
+
+        violations: list[str] = []
+        for job_name, job_def in jobs.items():
+            if not isinstance(job_def, dict):
+                continue
+            for i, step in enumerate(job_def.get("steps", [])):
+                if not isinstance(step, dict):
+                    continue
+                uses = step.get("uses", "")
+                if "actions/checkout@" in str(uses):
+                    with_block = step.get("with", {})
+                    if not isinstance(with_block, dict):
+                        violations.append(f"  {job_name}/step-{i}: no 'with' block")
+                        continue
+                    persist = with_block.get("persist-credentials")
+                    if persist is not False:
+                        violations.append(
+                            f"  {job_name}/step-{i}: persist-credentials={persist!r}"
+                        )
+
+        assert not violations, (
+            f"{path.name} has checkout steps without persist-credentials: false:\n"
+            + "\n".join(violations)
+        )
+
+    @pytest.mark.parametrize("path", ALL_TEMPLATES, ids=_tmpl_id)
+    def test_template_step_uses_refs_pinned_to_sha(self, path: Path) -> None:
+        """Template step-level uses: refs must be SHA-pinned."""
+        data = _load_workflow(path)
+        refs = _extract_step_uses_refs(data)
+
+        unpinned: list[str] = []
+        for context, ref in refs:
+            if ref.startswith("docker://") or ref.startswith("./"):
+                continue
+            if not _SHA_REF_RE.match(ref):
+                unpinned.append(f"  {context}: {ref}")
+
+        assert not unpinned, (
+            f"{path.name} has unpinned step action references:\n" + "\n".join(unpinned)
+        )
+
+    @pytest.mark.parametrize("path", ALL_TEMPLATES, ids=_tmpl_id)
+    def test_template_masks_secrets_before_env_export(self, path: Path) -> None:
+        """Templates must mask secret values before writing to $GITHUB_ENV.
+
+        Any step that writes a token/secret to GITHUB_ENV must call
+        ::add-mask:: first to prevent log exposure.
+        """
+        content = path.read_text()
+        lines = content.splitlines()
+
+        violations: list[str] = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Detect pattern: echo "SECRET_VAR=$VAR" >> "$GITHUB_ENV"
+            if ">> \"$GITHUB_ENV\"" in stripped or ">> $GITHUB_ENV" in stripped:
+                if "TOKEN" in stripped.upper() or "SECRET" in stripped.upper():
+                    # Look backwards for ::add-mask:: in the same run block
+                    found_mask = False
+                    for j in range(max(0, i - 10), i):
+                        if "::add-mask::" in lines[j]:
+                            found_mask = True
+                            break
+                    if not found_mask:
+                        violations.append(f"  L{i + 1}: {stripped}")
+
+        assert not violations, (
+            f"{path.name} writes token/secret to GITHUB_ENV without ::add-mask:::\n"
+            + "\n".join(violations)
+        )

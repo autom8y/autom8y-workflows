@@ -1,0 +1,37 @@
+name: Validate env injection
+description: >
+  Validates caller-supplied environment variable pairs against a denylist
+  of protected prefixes (GITHUB_, ACTIONS_, RUNNER_, AWS_, UV_INDEX_, etc.)
+  and exports safe pairs to GITHUB_ENV.
+
+inputs:
+  env-pairs:
+    description: Multiline KEY=VALUE pairs to validate and export
+    required: true
+  input-name:
+    description: Name of the originating input (used in error messages)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate and export env pairs
+      shell: bash
+      env:
+        _ENV_PAIRS: ${{ inputs.env-pairs }}
+        _INPUT_NAME: ${{ inputs.input-name }}
+      run: |
+        DENYLIST="^(GITHUB_|ACTIONS_|RUNNER_|AWS_|UV_INDEX_|PATH$|HOME$|SHELL$)"
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            echo "::error::Invalid ${_INPUT_NAME} line (must be KEY=VALUE): $line"
+            exit 1
+          fi
+          KEY="${line%%=*}"
+          if [[ "$KEY" =~ $DENYLIST ]]; then
+            echo "::error::${_INPUT_NAME} cannot override protected variable: $KEY"
+            exit 1
+          fi
+          echo "$line" >> $GITHUB_ENV
+        done <<< "$_ENV_PAIRS"
