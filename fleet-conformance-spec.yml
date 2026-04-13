@@ -1,0 +1,53 @@
+# Fleet Conformance Spec -- PKG-002
+# Single source of truth for pyproject.toml validation.
+# Consumed by .github/actions/fleet-conformance-gate/validate_pyproject.py
+#
+# Versioned so the validator can detect breaking changes in spec shape.
+# Satellites inherit this spec via SHA pin on satellite-ci-reusable.yml.
+version: "1.0"
+
+dimensions:
+  build_system:
+    requires: ["hatchling"]
+    build_backend: "hatchling.build"
+
+  project:
+    requires_python_floor: ">=3.12"
+    no_upper_bound: true
+
+  ruff:
+    line_length: 100
+    target_version: "py312"
+    # Minimum required rule categories. Repos MAY select additional categories
+    # (e.g., "W", "N", "C4", "G", "LOG") without triggering a FAIL.
+    select_floor: ["E", "F", "I", "UP", "B", "SIM", "TCH", "TID"]
+
+  mypy:
+    strict: true
+    python_version: "3.12"
+
+  coverage:
+    fail_under_floor: 75
+
+  sdk_pins:
+    # Require >= pins. Ban ~= (tilde/compatible-release) pins for autom8y-* SDKs.
+    style: ">="
+    # Only validate dependencies matching this prefix.
+    package_prefix: "autom8y-"
+
+# Per-repo exemptions. Key = repo name (github.event.repository.name).
+# Each entry may override dimension-level thresholds or skip the gate entirely.
+exemptions:
+  autom8y-dev-x:
+    coverage:
+      fail_under_floor: 42
+      ratchet_target: 75
+      ratchet_deadline: "2026-07-01"
+  autom8y-hermes:
+    skip_all: true
+    reason: "Go service with Python plugins -- exempt from Python fleet standard"
+  autom8y-data:
+    coverage:
+      fail_under_floor: 70
+      ratchet_target: 75
+      ratchet_deadline: "2026-06-15"
