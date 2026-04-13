@@ -778,7 +778,7 @@ jobs:
             echo "::error::OpenAPI spec not found at ${{ inputs.openapi_spec_path }}"
             exit 1
           fi
-          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset .fleet-schemas/spectral-fleet.yaml
+          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset .fleet-schemas/spectral-fleet.yaml --fail-severity=error
 
   spec-check:
     name: OpenAPI Spec Drift
