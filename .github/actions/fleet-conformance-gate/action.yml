@@ -1,0 +1,51 @@
+name: Fleet Conformance Gate
+description: >
+  Validates a repository's pyproject.toml against the fleet conformance spec
+  (fleet-conformance-spec.yml). Reports PASS/FAIL/WARN per dimension.
+  Repos with skip_all exemptions are silently skipped.
+
+inputs:
+  repo-name:
+    description: Repository name for exemption lookup (e.g., "autom8y-ads")
+    required: true
+  pyproject-path:
+    description: Path to pyproject.toml (relative to repo root)
+    required: false
+    default: "pyproject.toml"
+  spec-path:
+    description: Path to fleet-conformance-spec.yml (resolved relative to workflows repo checkout)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve spec path
+      id: resolve
+      shell: bash
+      run: |
+        # The spec file lives at the root of autom8y-workflows.
+        # When called from satellite-ci-reusable.yml, the workflows repo is
+        # checked out at $GITHUB_ACTION_PATH/../../.. (action lives 3 levels deep).
+        # We use GITHUB_ACTION_PATH which points to this action's directory.
+        if [ -n "${{ inputs.spec-path }}" ]; then
+          SPEC="${{ inputs.spec-path }}"
+        else
+          SPEC="${GITHUB_ACTION_PATH}/../../../fleet-conformance-spec.yml"
+        fi
+        if [ ! -f "$SPEC" ]; then
+          echo "::error::Fleet conformance spec not found at $SPEC"
+          exit 1
+        fi
+        echo "spec_path=$SPEC" >> "$GITHUB_OUTPUT"
+        echo "script_path=${GITHUB_ACTION_PATH}/validate_pyproject.py" >> "$GITHUB_OUTPUT"
+
+    - name: Validate pyproject.toml
+      shell: bash
+      env:
+        _SPEC_PATH: ${{ steps.resolve.outputs.spec_path }}
+        _SCRIPT_PATH: ${{ steps.resolve.outputs.script_path }}
+        _PYPROJECT_PATH: ${{ inputs.pyproject-path }}
+        _REPO_NAME: ${{ inputs.repo-name }}
+      run: |
+        python "$_SCRIPT_PATH" "$_SPEC_PATH" "$_PYPROJECT_PATH" --repo-name "$_REPO_NAME"
