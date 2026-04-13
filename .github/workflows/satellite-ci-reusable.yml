@@ -166,6 +166,12 @@ on:
         type: string
         default: '.ci/semantic-baseline.json'
 
+      # --- Optional: Fleet pyproject.toml conformance gate ---
+      conformance_gate:
+        description: 'Validate pyproject.toml against fleet conformance spec'
+        type: boolean
+        default: true
+
       # --- sdk-contract-governance Sprint 3: Consumer Validation Gate ---
       # When invoked from autom8y/sdk-publish-v2.yml's consumer-gate job, the
       # caller passes a candidate SDK wheel built from the publish-pipeline
@@ -916,3 +922,28 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "> **BLOCKED**: Semantic regression detected. Fix the regressions above before merging." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  conformance-gate:
+    name: Fleet Conformance Gate
+    if: inputs.conformance_gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Run conformance gate
+        uses: ./.github/actions/fleet-conformance-gate
+        with:
+          repo-name: ${{ github.event.repository.name }}
