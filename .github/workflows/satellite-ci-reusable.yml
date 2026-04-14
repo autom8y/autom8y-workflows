@@ -393,12 +393,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Generate App token for governance repo checkout
+        id: governance-app-token
+        if: inputs.governance_repo_root != ''
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y-api-schemas
+
       - name: Checkout governance repo (contract tests)
         if: inputs.governance_repo_root != ''
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: autom8y/autom8y-api-schemas
           path: ${{ inputs.governance_repo_root }}
+          token: ${{ steps.governance-app-token.outputs.token }}
           sparse-checkout: |
             .ledge/
             src/
