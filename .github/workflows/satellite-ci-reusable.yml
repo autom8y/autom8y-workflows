@@ -198,6 +198,12 @@ on:
         type: string
         default: ''
 
+      # --- Optional: Contract/governance test support ---
+      governance_repo_root:
+        description: 'Path to checkout autom8y-api-schemas for contract/governance tests (relative to workspace)'
+        type: string
+        default: ''
+
 jobs:
   lint:
     name: Lint & Type Check
@@ -247,12 +253,34 @@ jobs:
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
-      # sdk-contract-governance Sprint 3: when invoked by the consumer-gate
-      # the satellite must run its existing tests against a CANDIDATE SDK
-      # wheel, not the registry version. We download the wheel from the
-      # parent workflow run (autom8y/sdk-publish-v2.yml's consumer-gate
-      # job) and force-reinstall it into the venv. The download uses the
-      # GitHub App token already on the runner via secrets: inherit.
+      # sdk-contract-governance Sprint 3 + WS-alpha (2026-04-14): when invoked
+      # by the consumer-gate the satellite must run its existing tests against
+      # a CANDIDATE SDK wheel, not the registry version. We download the wheel
+      # from the parent workflow run (autom8y/sdk-publish-v2.yml's
+      # consumer-gate job) and force-reinstall it into the venv.
+      #
+      # Cross-repo artifact auth requirement: actions/download-artifact@v4
+      # requires a token with actions:read on the SOURCE repo when
+      # `repository:` is set to a different repo than the runner's
+      # github.repository. The default GITHUB_TOKEN is scoped only to the
+      # satellite repo (issuer of the workflow run) and cannot read artifacts
+      # from autom8y/autom8y -- this manifests as "Not Found" (a
+      # permission-denied masquerading as 404). We mint a short-lived
+      # GitHub App installation token with owner:autom8y repositories:autom8y
+      # so the App's actions:read permission on that install scope authorizes
+      # the cross-repo download. The App (APP_ID/APP_PRIVATE_KEY) is
+      # already used elsewhere in this reusable workflow (integration,
+      # convention-check, contract-tests jobs).
+      - name: Generate App token for cross-repo artifact download (consumer-gate)
+        id: cross-repo-app-token
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+
       - name: Download candidate SDK wheel (consumer-gate)
         if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -261,7 +289,7 @@ jobs:
           path: _candidate-wheel
           repository: autom8y/autom8y
           run-id: ${{ inputs.candidate_wheel_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
         if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
@@ -281,6 +309,11 @@ jobs:
 
       - name: Run linting
         run: uv run --no-sources ruff check .
+
+      - name: Convention enforcement gate (BLE001/E722)
+        run: |
+          echo "Checking bare-except convention enforcement..."
+          uv run --no-sources ruff check --select BLE001,E722 .
 
       - name: Type check (strict)
         run: uv run --no-sources mypy ${{ inputs.mypy_targets }} --ignore-missing-imports ${{ inputs.mypy_strict && '--strict' || '' }}
@@ -360,6 +393,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout governance repo (contract tests)
+        if: inputs.governance_repo_root != ''
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: autom8y/autom8y-api-schemas
+          path: ${{ inputs.governance_repo_root }}
+          sparse-checkout: |
+            .ledge/
+            src/
+            tests/contracts/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Set GOVERNANCE_REPO_ROOT
+        if: inputs.governance_repo_root != ''
+        run: |
+          echo "GOVERNANCE_REPO_ROOT=${{ github.workspace }}/${{ inputs.governance_repo_root }}" >> $GITHUB_ENV
+
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           version: "0.10.8"
@@ -402,7 +453,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
-      # sdk-contract-governance Sprint 3: see lint job for full rationale.
+      # sdk-contract-governance Sprint 3 + WS-alpha (2026-04-14):
+      # see lint job for full rationale on the App-token auth path.
+      - name: Generate App token for cross-repo artifact download (consumer-gate)
+        id: cross-repo-app-token
+        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+
       - name: Download candidate SDK wheel (consumer-gate)
         if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -411,7 +473,7 @@ jobs:
           path: _candidate-wheel
           repository: autom8y/autom8y
           run-id: ${{ inputs.candidate_wheel_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
         if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
