@@ -198,6 +198,12 @@ on:
         type: string
         default: ''
 
+      # --- Optional: Test job timeout ---
+      test_timeout:
+        description: 'Timeout in minutes for the test job (default: 20)'
+        type: number
+        default: 20
+
       # --- Optional: Contract/governance test support ---
       governance_repo_root:
         description: 'Path to checkout autom8y-api-schemas for contract/governance tests (relative to workspace)'
@@ -379,7 +385,7 @@ jobs:
     needs: matrix-prep
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ inputs.test_timeout }}
     permissions:
       id-token: write
       contents: read
