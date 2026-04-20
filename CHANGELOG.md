@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented
+- **Opt-out from fleet env/secret platformization initiative** (FLEET-workflows, Wave 3).
+  `autom8y-workflows` has no runtime env surface: no `.envrc`, no `.env/` dir, no
+  `secretspec.toml`, no CLI/service entrypoint. `pyproject.toml` is scoped to the
+  YAML-validation test harness only. The 6-layer env loader and `secretspec` profile
+  contracts are not load-bearing here. Opt-out rationale and reversibility triggers
+  documented in session-local `.know/opt-out-env-secret-platformization.md`
+  (gitignored by infra convention). Source handoff:
+  `autom8y-asana/.ledge/reviews/HANDOFF-hygiene-asana-to-hygiene-fleet-2026-04-20.md`.
+
 ## [1.0.0] - 2026-04-19
 
 ### Added
