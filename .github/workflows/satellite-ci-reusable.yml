@@ -844,7 +844,9 @@ jobs:
           ref: main
           path: .fleet-schemas
           token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: spectral-fleet.yaml
+          sparse-checkout: |
+            spectral-fleet.yaml
+            spectral-functions/  # HYG-META-006: include Spectral custom functions (envelopeExemptCheck.js)
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
