@@ -846,7 +846,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           sparse-checkout: |
             spectral-fleet.yaml
-            spectral-functions/  # HYG-META-006: include Spectral custom functions (envelopeExemptCheck.js)
+            spectral-functions/
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
