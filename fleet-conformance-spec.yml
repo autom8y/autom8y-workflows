@@ -37,6 +37,17 @@ dimensions:
 
 # Per-repo exemptions. Key = repo name (github.event.repository.name).
 # Each entry may override dimension-level thresholds or skip the gate entirely.
+#
+# Exemption categories:
+#   coverage.*                          -- per-repo coverage floor overrides + ratchet
+#   skip_all                            -- full gate skip (e.g., non-Python services)
+#   project.adr_exempt_upper_bound      -- field-keyed ADR exemption for the
+#                                          `no_upper_bound` categorical rule. Cites
+#                                          an authorizing ADR (opaque provenance
+#                                          token; validator does NOT parse ADR
+#                                          content per FLAG-A1 mitigation -- cite-
+#                                          by-reference only). Scope bounded to the
+#                                          named `field` (e.g., requires-python).
 exemptions:
   autom8y-dev-x:
     coverage:
@@ -51,3 +62,27 @@ exemptions:
       fail_under_floor: 70
       ratchet_target: 75
       ratchet_deadline: "2026-06-15"
+    project:
+      adr_exempt_upper_bound:
+        adr_id: "ADR-ANCHOR-001"
+        field: "requires-python"
+  autom8y-ads:
+    project:
+      adr_exempt_upper_bound:
+        adr_id: "ADR-ANCHOR-001"
+        field: "requires-python"
+  autom8y-asana:
+    project:
+      adr_exempt_upper_bound:
+        adr_id: "ADR-ANCHOR-001"
+        field: "requires-python"
+  autom8y-scheduling:
+    project:
+      adr_exempt_upper_bound:
+        adr_id: "ADR-ANCHOR-001"
+        field: "requires-python"
+  autom8y-sms:
+    project:
+      adr_exempt_upper_bound:
+        adr_id: "ADR-ANCHOR-001"
+        field: "requires-python"

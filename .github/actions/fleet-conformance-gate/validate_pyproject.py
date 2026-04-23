@@ -61,11 +61,33 @@ def validate_build_system(pyproject: dict[str, Any], spec: dict[str, Any], _exem
     return DimensionResult("build_system", "PASS", "hatchling build system configured correctly")
 
 
-def validate_project(pyproject: dict[str, Any], spec: dict[str, Any], _exemption: dict[str, Any] | None) -> DimensionResult:
+def validate_project(pyproject: dict[str, Any], spec: dict[str, Any], exemption: dict[str, Any] | None) -> DimensionResult:
     project = pyproject.get("project", {})
     requires_python = project.get("requires-python", "")
 
     errors = []
+
+    # Check field-keyed ADR exemption for the `no_upper_bound` categorical rule.
+    #
+    # Shape (per fleet-conformance-spec.yml schema extension):
+    #   exemptions:
+    #     <repo-name>:
+    #       project:
+    #         adr_exempt_upper_bound:
+    #           adr_id: "ADR-ANCHOR-001"       # opaque provenance token; NOT parsed here
+    #           field: "requires-python"        # which field the exemption covers
+    #
+    # Validator treats `adr_id` as an opaque provenance token per FLAG-A1 mitigation
+    # (cite-by-reference, NOT ADR content-embedding). Categorical default behavior
+    # is preserved for repos WITHOUT exemption metadata.
+    upper_bound_exempt = False
+    adr_id_cited: str | None = None
+    if exemption and "project" in exemption:
+        proj_exemption = exemption["project"]
+        adr_exempt = proj_exemption.get("adr_exempt_upper_bound")
+        if adr_exempt and adr_exempt.get("field") == "requires-python":
+            upper_bound_exempt = True
+            adr_id_cited = adr_exempt.get("adr_id")
 
     # Check floor: must be >= the spec floor version
     floor = spec["requires_python_floor"]  # e.g. ">=3.12"
@@ -81,12 +103,19 @@ def validate_project(pyproject: dict[str, Any], spec: dict[str, Any], _exemption
             actual_ver = tuple(int(x) for x in actual_match.group(1).split("."))
             if actual_ver < spec_ver:
                 errors.append(f"requires-python floor {requires_python} is below fleet minimum {floor}")
-        # Check no upper bound
-        if spec.get("no_upper_bound") and "<" in requires_python:
+        # Check no upper bound (suppressed when ADR exemption present)
+        if spec.get("no_upper_bound") and "<" in requires_python and not upper_bound_exempt:
             errors.append(f"requires-python '{requires_python}' has upper bound (fleet standard forbids upper bounds)")
 
     if errors:
         return DimensionResult("project", "FAIL", "; ".join(errors))
+    if upper_bound_exempt and "<" in requires_python:
+        return DimensionResult(
+            "project", "WARN",
+            f"requires-python '{requires_python}' has upper bound; exempted by {adr_id_cited} "
+            f"(field: requires-python)",
+            details={"adr_id": adr_id_cited, "field": "requires-python"},
+        )
     return DimensionResult("project", "PASS", f"requires-python '{requires_python}' meets fleet floor")
 
 
