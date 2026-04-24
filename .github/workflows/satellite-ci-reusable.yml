@@ -210,6 +210,12 @@ on:
         type: string
         default: ''
 
+      # --- R1-v3: event-class-invariant canonical checkout SHA ---
+      autom8y_workflows_sha:
+        description: 'SHA of autom8y-workflows at which the satellite pinned this reusable workflow. Passed as explicit input to bypass workflow_ref context-variable parsing (R1-v3 mechanism). Required; callers MUST pass github.sha.'
+        required: true
+        type: string
+
 jobs:
   lint:
     name: Lint & Type Check
@@ -1046,21 +1052,11 @@ jobs:
       # fleet-conformance canonical" conclusion=failure because
       # github.action_ref resolved to an actions/checkout SHA, not the
       # autom8y-workflows caller pin).
-      - name: Resolve caller-pin SHA from workflow_ref
-        shell: bash
-        run: |
-          # Reusable-workflow context: github.workflow_ref format is
-          # "owner/repo/.github/workflows/filename.yml@<SHA>"
-          # Parse the SHA after "@" — this is the caller-pinned SHA that
-          # pins BOTH the reusable workflow AND the canonical action+spec
-          # checkout per R1a canonical-at-caller-pin invariant.
-          echo "WORKFLOW_SHA=${GITHUB_WORKFLOW_REF##*@}" >> "$GITHUB_ENV"
-
       - name: Checkout fleet-conformance canonical (autom8y-workflows)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: autom8y/autom8y-workflows
-          ref: ${{ env.WORKFLOW_SHA }}
+          ref: ${{ inputs.autom8y_workflows_sha }}
           path: .fleet-conformance-canonical
           persist-credentials: false
 
