@@ -1024,7 +1024,24 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
-      - name: Run conformance gate
-        uses: ./.github/actions/fleet-conformance-gate
+      # R1 canonical-source-integrity: check out autom8y-workflows at the SHA
+      # the caller pinned (github.action_ref), then invoke the fleet-conformance
+      # gate action and spec from that canonical checkout. This eliminates the
+      # vendored-replica drift vector where satellites' local
+      # .github/actions/fleet-conformance-gate/ and fleet-conformance-spec.yml
+      # could diverge from the canonical source at autom8y-workflows.
+      # Reference: ADR-ANCHOR-001 (merged PR autom8y#159); PT-EXEC adjudication
+      # STAGE-EXEC Phase R1-1 Gate R1-1b.
+      - name: Checkout fleet-conformance canonical (autom8y-workflows)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: autom8y/autom8y-workflows
+          ref: ${{ github.action_ref }}
+          path: .fleet-conformance-canonical
+          persist-credentials: false
+
+      - name: Run conformance gate (from canonical checkout)
+        uses: ./.fleet-conformance-canonical/.github/actions/fleet-conformance-gate
         with:
           repo-name: ${{ github.event.repository.name }}
+          spec-path: ${{ github.workspace }}/.fleet-conformance-canonical/fleet-conformance-spec.yml
