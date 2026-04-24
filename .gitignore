@@ -19,8 +19,10 @@ __pycache__/
 # Auto-managed by ari sync — channel directories are regenerated on every sync.
 # Each channel also has a provenance-driven .gitignore for per-file precision.
 .claude/
+.codex/
 .gemini/
 .mcp.json
+.opencode/
 # KNOSSOS:END channel-ignores
 
 # KNOSSOS:START infra-ignores
