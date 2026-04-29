@@ -39,3 +39,6 @@ __pycache__/
 
 # Scratch / temporary files (PT-00.5 recurrence prevention)
 tmp/
+
+# Hypothesis test cache (AP-HYG-CLONE-D mitigation)
+.hypothesis/
