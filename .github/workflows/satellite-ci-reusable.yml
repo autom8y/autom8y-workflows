@@ -214,6 +214,10 @@ on:
         description: 'Spike measurement: omit --cov* flags so wall delta vs cov-on can be measured (target 5)'
         type: boolean
         default: false
+      step_decompose_mode:
+        description: 'SRE-002 spike measurement: emit per-step timestamp markers around the test job setup steps (checkout, setup-uv, setup-python, AWS OIDC, CodeArtifact, validate-env-injection, uv sync). Markers go to stdout via "::group::" + epoch nanos so the per-step ci_job_wall ledger can be parsed from gh run view --log. Default false; production callers unaffected.'
+        type: boolean
+        default: false
 
       # --- Optional: Test job timeout ---
       test_timeout:
@@ -418,9 +422,21 @@ jobs:
         shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list) }}
 
     steps:
+      # SRE-002 step-decompose: marker BEFORE checkout (job has just started).
+      # The job-start-to-checkout gap is captured by GitHub's job-level startedAt.
+      # Each STEP-DECOMPOSE line carries: shard, step-name, phase (start|end),
+      # epoch-nanos. Parse via: grep '^STEP-DECOMPOSE' in gh run view --log.
+      - name: STEP-DECOMPOSE marker — checkout (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=checkout phase=start epoch_ns=$(date +%s%N)"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: STEP-DECOMPOSE marker — checkout (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=checkout phase=end epoch_ns=$(date +%s%N)"
 
       - name: Generate App token for governance repo checkout
         id: governance-app-token
@@ -451,22 +467,50 @@ jobs:
         run: |
           echo "GOVERNANCE_REPO_ROOT=${{ github.workspace }}/${{ inputs.governance_repo_root }}" >> $GITHUB_ENV
 
+      - name: STEP-DECOMPOSE marker — setup-uv (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=setup-uv phase=start epoch_ns=$(date +%s%N)"
+
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
+      - name: STEP-DECOMPOSE marker — setup-uv (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=setup-uv phase=end epoch_ns=$(date +%s%N)"
+
+      - name: STEP-DECOMPOSE marker — setup-python (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=setup-python phase=start epoch_ns=$(date +%s%N)"
+
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ inputs.python_version }}
+
+      - name: STEP-DECOMPOSE marker — setup-python (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=setup-python phase=end epoch_ns=$(date +%s%N)"
+
+      - name: STEP-DECOMPOSE marker — aws-oidc (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=aws-oidc phase=start epoch_ns=$(date +%s%N)"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
           aws-region: us-east-1
+
+      - name: STEP-DECOMPOSE marker — aws-oidc (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=aws-oidc phase=end epoch_ns=$(date +%s%N)"
+
+      - name: STEP-DECOMPOSE marker — codeartifact (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=codeartifact phase=start epoch_ns=$(date +%s%N)"
 
       - name: Get CodeArtifact auth token
         id: codeartifact
@@ -478,10 +522,18 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
+      - name: STEP-DECOMPOSE marker — codeartifact (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=codeartifact phase=end epoch_ns=$(date +%s%N)"
+
       - name: Configure uv for CodeArtifact
         run: |
           echo "UV_INDEX_AUTOM8Y_USERNAME=aws" >> $GITHUB_ENV
           echo "UV_INDEX_AUTOM8Y_PASSWORD=${{ steps.codeartifact.outputs.token }}" >> $GITHUB_ENV
+
+      - name: STEP-DECOMPOSE marker — validate-env-injection (start)
+        if: inputs.step_decompose_mode && inputs.test_env != ''
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=validate-env-injection phase=start epoch_ns=$(date +%s%N)"
 
       - name: Set test environment variables
         if: inputs.test_env != ''
@@ -490,8 +542,20 @@ jobs:
           env-pairs: ${{ inputs.test_env }}
           input-name: test_env
 
+      - name: STEP-DECOMPOSE marker — validate-env-injection (end)
+        if: inputs.step_decompose_mode && inputs.test_env != ''
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=validate-env-injection phase=end epoch_ns=$(date +%s%N)"
+
+      - name: STEP-DECOMPOSE marker — uv-sync (start)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=uv-sync phase=start epoch_ns=$(date +%s%N)"
+
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
+
+      - name: STEP-DECOMPOSE marker — uv-sync (end)
+        if: inputs.step_decompose_mode
+        run: echo "STEP-DECOMPOSE shard=${{ matrix.shard }} step=uv-sync phase=end epoch_ns=$(date +%s%N)"
 
       # sdk-contract-governance Sprint 3 + WS-alpha (2026-04-14):
       # see lint job for full rationale on the App-token auth path.
