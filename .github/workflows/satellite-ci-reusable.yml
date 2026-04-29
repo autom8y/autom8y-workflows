@@ -198,6 +198,23 @@ on:
         type: string
         default: ''
 
+      # --- eunomia spike: read-only measurement overlays ---
+      # Added 2026-04-30 for test-suite-perf-baseline-v3 spike (autom8y-data
+      # Sprint 3 pre-stage). Both default false; when true they skip coverage
+      # instrumentation and (optionally) restrict pytest to --collect-only so
+      # collection-time and coverage-tax can be measured separately on the
+      # production substrate without the same-substrate-same-window violation
+      # of laptop measurement. Safe to leave permanently; default-false keeps
+      # production callers byte-for-byte identical.
+      pytest_collect_only_mode:
+        description: 'Spike measurement: pass --collect-only and skip --cov flags (target 2)'
+        type: boolean
+        default: false
+      pytest_disable_coverage:
+        description: 'Spike measurement: omit --cov* flags so wall delta vs cov-on can be measured (target 5)'
+        type: boolean
+        default: false
+
       # --- Optional: Test job timeout ---
       test_timeout:
         description: 'Timeout in minutes for the test job (default: 20)'
@@ -517,11 +534,23 @@ jobs:
           TEST_SPLITS: ${{ inputs.test_splits }}
           MATRIX_SHARD: ${{ matrix.shard }}
           TEST_DURATIONS_PATH: ${{ inputs.test_durations_path }}
+          COLLECT_ONLY: ${{ inputs.pytest_collect_only_mode }}
+          DISABLE_COV: ${{ inputs.pytest_disable_coverage }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
-          ARGS="$ARGS -v --cov=${{ inputs.coverage_package }}"
-          ARGS="$ARGS --cov-report=xml --cov-fail-under=${{ inputs.coverage_threshold }}"
+          # eunomia spike overlays: when collect-only OR disable-coverage is
+          # true, omit all --cov* flags. collect-only adds --collect-only and
+          # forces --no-cov to keep collection time uncontaminated by
+          # instrumentation startup.
+          if [ "${COLLECT_ONLY}" = "true" ]; then
+            ARGS="$ARGS --collect-only --no-cov"
+          elif [ "${DISABLE_COV}" = "true" ]; then
+            ARGS="$ARGS --no-cov"
+          else
+            ARGS="$ARGS -v --cov=${{ inputs.coverage_package }}"
+            ARGS="$ARGS --cov-report=xml --cov-fail-under=${{ inputs.coverage_threshold }}"
+          fi
 
           # Optional parallel execution
           if [ "${{ inputs.test_parallel }}" = "true" ]; then
@@ -589,6 +618,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload coverage
+        if: inputs.pytest_collect_only_mode != true && inputs.pytest_disable_coverage != true
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
         with:
           files: ./coverage.xml
