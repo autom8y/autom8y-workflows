@@ -204,6 +204,13 @@ on:
         type: number
         default: 20
 
+      # --- Optional: Runner tier (org-runner-tier-enablement-gated) ---
+      runner_size:
+        description: 'Runner tier: "standard" (ubuntu-latest, 2-vCPU) or "large" (ubuntu-latest-large, 8-vCPU; requires org-runner-tier enablement)'
+        type: string
+        default: 'standard'
+        required: false
+
       # --- Optional: Contract/governance test support ---
       governance_repo_root:
         description: 'Path to checkout autom8y-api-schemas for contract/governance tests (relative to workspace)'
@@ -390,7 +397,7 @@ jobs:
   test:
     needs: matrix-prep
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.test_timeout }}
     permissions:
       id-token: write
