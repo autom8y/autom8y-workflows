@@ -529,6 +529,8 @@ jobs:
           MATRIX_SHARD: ${{ matrix.shard }}
           TEST_DURATIONS_PATH: ${{ inputs.test_durations_path }}
           DISABLE_COV: ${{ inputs.pytest_disable_coverage }}
+          COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
@@ -540,8 +542,8 @@ jobs:
           if [ "${DISABLE_COV}" = "true" ]; then
             ARGS="$ARGS -v --no-cov"
           else
-            ARGS="$ARGS -v --cov=${{ inputs.coverage_package }}"
-            ARGS="$ARGS --cov-report=xml --cov-fail-under=${{ inputs.coverage_threshold }}"
+            ARGS="$ARGS -v --cov=${COVERAGE_PACKAGE}"
+            ARGS="$ARGS --cov-report=xml --cov-fail-under=${COVERAGE_THRESHOLD}"
           fi
 
           # Optional parallel execution
