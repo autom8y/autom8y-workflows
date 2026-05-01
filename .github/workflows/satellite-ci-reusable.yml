@@ -198,6 +198,17 @@ on:
         type: string
         default: ''
 
+      # --- Optional: PR-mode-no-cov mechanism ---
+      # Added 2026-05-01 for forward-path-2026-04-30 W3 phase-C decomposition
+      # (autom8y-data Sprint 3). Default false: production callers byte-for-byte
+      # identical. When true, omits --cov* flags from pytest invocation and
+      # skips codecov upload — used by callers to strip coverage on PR runs
+      # while preserving cov enforcement on push-to-main runs.
+      pytest_disable_coverage:
+        description: 'When true, omit --cov* flags so pytest_process_wall is uncontaminated by coverage instrumentation. Used by satellites to enable PR-mode-no-cov + push-mode-cov-on policy. Default false (production unchanged).'
+        type: boolean
+        default: false
+
       # --- Optional: Test job timeout ---
       test_timeout:
         description: 'Timeout in minutes for the test job (default: 20)'
@@ -517,11 +528,23 @@ jobs:
           TEST_SPLITS: ${{ inputs.test_splits }}
           MATRIX_SHARD: ${{ matrix.shard }}
           TEST_DURATIONS_PATH: ${{ inputs.test_durations_path }}
+          DISABLE_COV: ${{ inputs.pytest_disable_coverage }}
+          COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
-          ARGS="$ARGS -v --cov=${{ inputs.coverage_package }}"
-          ARGS="$ARGS --cov-report=xml --cov-fail-under=${{ inputs.coverage_threshold }}"
+          # PR-mode-no-cov mechanism: when pytest_disable_coverage=true, omit
+          # all --cov* flags so pytest_process_wall is uncontaminated by
+          # coverage instrumentation. Satellite callers wire conditional on
+          # github.event_name == 'pull_request' to enable PR-mode-no-cov +
+          # push-mode-cov-on policy (forward-path-2026-04-30 W3 phase-C).
+          if [ "${DISABLE_COV}" = "true" ]; then
+            ARGS="$ARGS -v --no-cov"
+          else
+            ARGS="$ARGS -v --cov=${COVERAGE_PACKAGE}"
+            ARGS="$ARGS --cov-report=xml --cov-fail-under=${COVERAGE_THRESHOLD}"
+          fi
 
           # Optional parallel execution
           if [ "${{ inputs.test_parallel }}" = "true" ]; then
@@ -589,6 +612,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload coverage
+        if: inputs.pytest_disable_coverage != true
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
         with:
           files: ./coverage.xml
