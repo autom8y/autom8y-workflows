@@ -893,7 +893,28 @@ jobs:
           persist-credentials: false
 
       - name: Install Spectral CLI
-        run: npm install -g @stoplight/spectral-cli@6.15.0
+        # spectral-cli is version-pinned (6.15.0) but its @stoplight/spectral-*
+        # transitives float. @stoplight/spectral-rulesets@1.22.3 (2026-05-21)
+        # regressed and CRASHES ("Cannot read properties of null (reading 'enum')",
+        # exit 2) on OpenAPI 3.1 specs via the ruleset's `extends: spectral:oas`.
+        # `npm install -g` resolves the latest matching transitive each run, so
+        # this broke every satellite deploy fleet-wide ~2026-05-21 with no code
+        # change. Lock the last-good rulesets (1.22.2, 2026-05-12) via an
+        # `overrides` package.json and install locally; the lint step resolves
+        # `spectral` from node_modules/.bin (added to PATH). Bump the pin when a
+        # fixed spectral-rulesets ships.
+        run: |
+          cat > package.json <<'JSON'
+          {
+            "name": "spectral-runner",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": { "@stoplight/spectral-cli": "6.15.0" },
+            "overrides": { "@stoplight/spectral-rulesets": "1.22.2" }
+          }
+          JSON
+          npm install --no-audit --no-fund
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Lint OpenAPI spec
         run: |
