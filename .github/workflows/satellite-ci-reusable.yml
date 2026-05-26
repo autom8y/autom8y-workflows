@@ -84,6 +84,10 @@ on:
         description: 'pytest-xdist --dist strategy (e.g., "loadscope", "loadfile", "worksteal"). Empty = xdist default.'
         type: string
         default: ''
+      test_maxprocesses:
+        description: 'Cap pytest-xdist worker count when test_parallel=true (-n auto --maxprocesses=N). 0 = uncapped (default; -n auto unchanged). Set for memory-heavy suites that OOM the runner under -n auto.'
+        type: number
+        default: 0
       test_splits:
         description: 'Number of pytest-split matrix shards for the test job (1 = disable sharding, default: 1)'
         type: number
@@ -531,6 +535,7 @@ jobs:
           DISABLE_COV: ${{ inputs.pytest_disable_coverage }}
           COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
           COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+          TEST_MAXPROCESSES: ${{ inputs.test_maxprocesses }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
@@ -549,6 +554,13 @@ jobs:
           # Optional parallel execution
           if [ "${{ inputs.test_parallel }}" = "true" ]; then
             ARGS="$ARGS -n auto"
+            # Optional worker cap for memory-heavy suites: -n auto picks one
+            # worker per logical CPU, which can exceed runner RAM and OOM-kill
+            # a worker. test_maxprocesses>0 bounds the worker count via xdist
+            # --maxprocesses while keeping CPU-aware auto-detection. 0 = uncapped.
+            if [ "${TEST_MAXPROCESSES}" -gt 0 ]; then
+              ARGS="$ARGS --maxprocesses=${TEST_MAXPROCESSES}"
+            fi
           fi
 
           # Optional xdist distribution strategy (only applied if non-empty)
