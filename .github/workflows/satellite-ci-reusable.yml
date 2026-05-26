@@ -535,6 +535,7 @@ jobs:
           DISABLE_COV: ${{ inputs.pytest_disable_coverage }}
           COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
           COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+          TEST_MAXPROCESSES: ${{ inputs.test_maxprocesses }}
         run: |
           ARGS="tests/"
           ARGS="$ARGS -m '${{ inputs.test_markers_exclude }}'"
@@ -557,8 +558,8 @@ jobs:
             # worker per logical CPU, which can exceed runner RAM and OOM-kill
             # a worker. test_maxprocesses>0 bounds the worker count via xdist
             # --maxprocesses while keeping CPU-aware auto-detection. 0 = uncapped.
-            if [ "${{ inputs.test_maxprocesses }}" -gt 0 ]; then
-              ARGS="$ARGS --maxprocesses=${{ inputs.test_maxprocesses }}"
+            if [ "${TEST_MAXPROCESSES}" -gt 0 ]; then
+              ARGS="$ARGS --maxprocesses=${TEST_MAXPROCESSES}"
             fi
           fi
 
