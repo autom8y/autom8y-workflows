@@ -329,7 +329,20 @@ jobs:
             exit 1
           fi
           echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
-          uv pip install --no-sources --force-reinstall "$CANDIDATE"
+          # Pin every already-resolved transitive (from the coherent `uv sync` env
+          # above) to its locked version so the candidate force-install cannot
+          # partial-re-resolve a co-versioned family out of lockstep. Without this,
+          # force-reinstalling the wheel can drag e.g. opentelemetry-sdk to latest
+          # while leaving opentelemetry-api at the locked version -- an incoherent
+          # pairing no real `uv lock` adoption ever yields. That skew surfaces as
+          # `AttributeError: type object 'TraceFlags' has no attribute
+          # 'RANDOM_TRACE_ID'` on every span-emitting test and false-fails the gate.
+          # We exclude the candidate dist itself so the new version is still allowed
+          # to replace the locked one. (Mirrors how a consumer actually adopts the
+          # SDK: api+sdk co-resolve and stay coherent.)
+          uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
+            | grep -ivE "^${{ inputs.candidate_sdk_name }}(==| @|\[)" > _candidate-constraints.txt
+          uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Check formatting
         run: uv run --no-sources ruff format . --check
@@ -524,7 +537,20 @@ jobs:
             exit 1
           fi
           echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
-          uv pip install --no-sources --force-reinstall "$CANDIDATE"
+          # Pin every already-resolved transitive (from the coherent `uv sync` env
+          # above) to its locked version so the candidate force-install cannot
+          # partial-re-resolve a co-versioned family out of lockstep. Without this,
+          # force-reinstalling the wheel can drag e.g. opentelemetry-sdk to latest
+          # while leaving opentelemetry-api at the locked version -- an incoherent
+          # pairing no real `uv lock` adoption ever yields. That skew surfaces as
+          # `AttributeError: type object 'TraceFlags' has no attribute
+          # 'RANDOM_TRACE_ID'` on every span-emitting test and false-fails the gate.
+          # We exclude the candidate dist itself so the new version is still allowed
+          # to replace the locked one. (Mirrors how a consumer actually adopts the
+          # SDK: api+sdk co-resolve and stay coherent.)
+          uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
+            | grep -ivE "^${{ inputs.candidate_sdk_name }}(==| @|\[)" > _candidate-constraints.txt
+          uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Build pytest arguments
         id: pytest-args
