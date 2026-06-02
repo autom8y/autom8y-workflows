@@ -488,6 +488,97 @@ jobs:
           env-pairs: ${{ inputs.test_env }}
           input-name: test_env
 
+      # --- D1 vendor-pin (HANDOFF H4): pinned mysql_scanner runner-setup ------
+      # Make CI exercise the SAME pinned linux_amd64 mysql_scanner binary the
+      # deploy image vendors, so MATERIALIZATION_MODE=attach drill tests cannot
+      # silently fall back to the unpinned DuckDB REPOSITORY resolver (which
+      # re-opens the SIGSEGV the D1 pin eradicates — autom8y-data ADR-D1).
+      #
+      # FLEET-SHARED NO-OP CONTRACT: every step below self-gates on the presence
+      # of scripts/ci_fetch_pinned_mysql_scanner.sh in the CALLER repo. autom8y-data
+      # ships that script (autom8y-data #100); no other satellite does, so for every
+      # other caller hashFiles() returns '' and all of these steps are skipped — the
+      # workflow is byte-for-byte unchanged in behavior for non-autom8y-data callers.
+      # NO new workflow_call input is added.
+      #
+      # Fail-closed posture is LOAD-BEARING: a silent skip on autom8y-data would let
+      # the helper fall back to the unpinned REPOSITORY resolver and re-open the
+      # SIGSEGV. Every failure mode below fails the job (empty presign, fetch/auth
+      # failure, sha256 mismatch, absent binary, cache-poison). The fail-closed
+      # fetch asserts themselves live in the caller-owned script (curl -fSL + gunzip
+      # + sha256 assert + place); H4 only presigns -> exports the two env vars ->
+      # calls the script, and adds a cache-poison guard for the cache-HIT path.
+      - name: Resolve DUCKDB_EXTENSION_DIRECTORY (D1 vendor-pin)
+        if: hashFiles('scripts/ci_fetch_pinned_mysql_scanner.sh') != ''
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP}/duckdb-extensions/v1.4.4/linux_amd64"
+          mkdir -p "$DIR"
+          echo "DUCKDB_EXTENSION_DIRECTORY=${DIR}" >> "$GITHUB_ENV"
+          echo "D1: DUCKDB_EXTENSION_DIRECTORY=${DIR}"
+
+      # NO restore-keys: a near-miss prefix restore is the silent-drift failure
+      # mode (it would hydrate a DIFFERENT binary into the path, which the
+      # cache-poison guard below would then reject — but we refuse the near-miss
+      # outright so the miss path re-fetches the exact pinned asset).
+      - name: Cache pinned mysql_scanner binary (D1 vendor-pin)
+        id: cache-mysql-scanner
+        if: hashFiles('scripts/ci_fetch_pinned_mysql_scanner.sh') != ''
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.DUCKDB_EXTENSION_DIRECTORY }}
+          key: duckdb-mysql-scanner-${{ runner.os }}-linux_amd64-v1.4.4-sha256-082d998e0cf2ddeb
+
+      # On cache MISS only: presign the S3 object (mirrors monorepo #312
+      # service-build.yml) and call the caller-owned fetch script, which env-guards,
+      # curls -fSL, gunzips, sha256-asserts (default 082d998e...730e31) and places
+      # $DUCKDB_EXTENSION_DIRECTORY/mysql_scanner.duckdb_extension.
+      - name: Fetch pinned mysql_scanner on cache miss (D1 vendor-pin)
+        if: hashFiles('scripts/ci_fetch_pinned_mysql_scanner.sh') != '' && steps.cache-mysql-scanner.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # The github-actions-deploy role (assumed above via OIDC) holds s3:GetObject
+          # on the duckdb-extensions/v1.4.4/linux_amd64/* prefix (monorepo #312), so
+          # the presigned URL it mints is itself fetchable by curl -fSL (presign
+          # inherits the caller's perms).
+          FETCH_URL=$(aws s3 presign \
+            s3://autom8y-terraform/duckdb-extensions/v1.4.4/linux_amd64/mysql_scanner.duckdb_extension.gz \
+            --expires-in 1800)
+          echo "::add-mask::$FETCH_URL"
+          # FAIL-CLOSED: an empty presign would make the fetch script's REQUIRED-env
+          # guard the only thing standing between CI and the unpinned REPOSITORY
+          # resolver. Refuse to proceed.
+          if [ -z "${FETCH_URL}" ]; then
+            echo "::error::aws s3 presign returned an empty URL for the D1 mysql_scanner asset; failing closed to avoid a silent non-vendored (REPOSITORY-fallback) drill run"
+            exit 1
+          fi
+          export MYSQL_SCANNER_FETCH_URL="$FETCH_URL"
+          bash scripts/ci_fetch_pinned_mysql_scanner.sh
+
+      # Cache-poison guard — runs whenever the D1 gate is on (covers the cache-HIT
+      # path, where the fetch script is skipped and never re-asserts the sha). If the
+      # cached/fetched binary is absent or its sha256 drifts from the ADR-D1 pin, the
+      # job fails closed rather than running drills against a wrong/unpinned binary.
+      - name: Assert pinned mysql_scanner sha256 (D1 vendor-pin)
+        if: hashFiles('scripts/ci_fetch_pinned_mysql_scanner.sh') != ''
+        run: |
+          set -euo pipefail
+          EXPECTED="082d998e0cf2ddebf6a59cb1fb180b307ff4556c355b8da5afe483809b730e31"
+          BIN="${DUCKDB_EXTENSION_DIRECTORY}/mysql_scanner.duckdb_extension"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::D1 cache-poison guard: pinned binary absent at ${BIN}; refusing to run drills against the unpinned REPOSITORY resolver"
+            exit 1
+          fi
+          COMPUTED="$(sha256sum "$BIN" | awk '{print $1}')"
+          if [ "$COMPUTED" != "$EXPECTED" ]; then
+            echo "::error::D1 cache-poison guard: sha256 mismatch for ${BIN}"
+            echo "  expected: ${EXPECTED}"
+            echo "  computed: ${COMPUTED}"
+            exit 1
+          fi
+          echo "D1: pinned mysql_scanner sha256 verified (${EXPECTED}) at ${BIN}"
+      # --- end D1 vendor-pin (HANDOFF H4) ------------------------------------
+
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
