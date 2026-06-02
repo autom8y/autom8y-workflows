@@ -340,8 +340,12 @@ jobs:
           # We exclude the candidate dist itself so the new version is still allowed
           # to replace the locked one. (Mirrors how a consumer actually adopts the
           # SDK: api+sdk co-resolve and stay coherent.)
+          # Derive the candidate dist name from the wheel filename ($CANDIDATE is a
+          # trusted shell var, not a `${{ }}` template expansion) so no workflow
+          # input is ever interpolated into the shell (zizmor: code-injection-safe).
+          CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
           uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
-            | grep -ivE "^${{ inputs.candidate_sdk_name }}(==| @|\[)" > _candidate-constraints.txt
+            | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Check formatting
@@ -548,8 +552,12 @@ jobs:
           # We exclude the candidate dist itself so the new version is still allowed
           # to replace the locked one. (Mirrors how a consumer actually adopts the
           # SDK: api+sdk co-resolve and stay coherent.)
+          # Derive the candidate dist name from the wheel filename ($CANDIDATE is a
+          # trusted shell var, not a `${{ }}` template expansion) so no workflow
+          # input is ever interpolated into the shell (zizmor: code-injection-safe).
+          CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
           uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
-            | grep -ivE "^${{ inputs.candidate_sdk_name }}(==| @|\[)" > _candidate-constraints.txt
+            | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Build pytest arguments
