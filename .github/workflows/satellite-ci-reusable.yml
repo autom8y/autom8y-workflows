@@ -328,7 +328,7 @@ jobs:
             echo "::error::Consumer gate dispatched this run but no candidate wheel was found in the artifact"
             exit 1
           fi
-          echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
+          echo "Installing candidate wheel ${CANDIDATE}"
           # Pin every already-resolved transitive (from the coherent `uv sync` env
           # above) to its locked version so the candidate force-install cannot
           # partial-re-resolve a co-versioned family out of lockstep. Without this,
@@ -341,8 +341,8 @@ jobs:
           # to replace the locked one. (Mirrors how a consumer actually adopts the
           # SDK: api+sdk co-resolve and stay coherent.)
           # Derive the candidate dist name from the wheel filename ($CANDIDATE is a
-          # trusted shell var, not a `${{ }}` template expansion) so no workflow
-          # input is ever interpolated into the shell (zizmor: code-injection-safe).
+          # trusted shell var, not a templated workflow input) so no GitHub Actions
+          # expression is interpolated into the shell (zizmor: code-injection-safe).
           CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
           uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
@@ -540,7 +540,7 @@ jobs:
             echo "::error::Consumer gate dispatched this run but no candidate wheel was found in the artifact"
             exit 1
           fi
-          echo "Installing candidate ${CANDIDATE} for ${{ inputs.candidate_sdk_name }}@${{ inputs.candidate_sdk_version }}"
+          echo "Installing candidate wheel ${CANDIDATE}"
           # Pin every already-resolved transitive (from the coherent `uv sync` env
           # above) to its locked version so the candidate force-install cannot
           # partial-re-resolve a co-versioned family out of lockstep. Without this,
@@ -553,8 +553,8 @@ jobs:
           # to replace the locked one. (Mirrors how a consumer actually adopts the
           # SDK: api+sdk co-resolve and stay coherent.)
           # Derive the candidate dist name from the wheel filename ($CANDIDATE is a
-          # trusted shell var, not a `${{ }}` template expansion) so no workflow
-          # input is ever interpolated into the shell (zizmor: code-injection-safe).
+          # trusted shell var, not a templated workflow input) so no GitHub Actions
+          # expression is interpolated into the shell (zizmor: code-injection-safe).
           CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
           uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
