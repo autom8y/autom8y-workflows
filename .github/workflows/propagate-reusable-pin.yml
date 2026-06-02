@@ -1,0 +1,112 @@
+name: Propagate reusable-pin to satellites
+
+# Keeps each satellite's `.github/workflows/test.yml` pin of
+# `autom8y-workflows/.github/workflows/satellite-ci-reusable.yml` current.
+#
+# When this shared workflow changes on main (a shared-CI release), open lockstep
+# bump PRs across satellites updating BOTH the `uses: ...@<SHA>` pin AND the
+# `autom8y_workflows_sha:` input to the new SHA (the W4-R3 pin/input alignment
+# guard requires them to match). Closes the "merged-to-reusable-main != adopted"
+# gap that left autom8y-workflows#20 unadopted because satellites SHA-pin.
+#
+# DEPENDENCIES (sre to verify before this is functional):
+#   1. secrets.APP_ID / secrets.APP_PRIVATE_KEY (the fleet GitHub App) must be
+#      available in THIS repo (autom8y-workflows). Same App the lockfile-
+#      propagator uses in autom8y/.github/workflows/sdk-publish-v2.yml.
+#   2. The App must have contents:write + pull-requests:write on EVERY repo in
+#      `repositories:` below. NOTE: the lockfile-propagator's repositories list
+#      OMITS autom8y-dev-x — confirm the App is installed/permitted on dev-x.
+#   3. Satellites must already carry the dual-pin structure (a `uses:@<SHA>` line
+#      and an `autom8y_workflows_sha:` input). All 6 do as of the 2026-06-02
+#      releaser rollout; a future net-new satellite must be seeded once by hand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "autom8y-workflows SHA to pin (defaults to current HEAD)"
+        required: false
+        type: string
+      dry_run:
+        description: "List changes without opening PRs"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/satellite-ci-reusable.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: propagate-reusable-pin
+  cancel-in-progress: false
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint fleet App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y-data,autom8y-asana,autom8y-ads,autom8y-sms,autom8y-scheduling,autom8y-dev-x
+
+      - name: Open lockstep-bump PRs across satellites
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEW_SHA: ${{ inputs.sha || github.sha }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          SATELLITES: "autom8y-data autom8y-asana autom8y-ads autom8y-sms autom8y-scheduling autom8y-dev-x"
+          WF_PATH: ".github/workflows/test.yml"
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$NEW_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::NEW_SHA is not a 40-char hex SHA: '$NEW_SHA'"
+            exit 1
+          fi
+          branch="auto/reusable-pin-${NEW_SHA:0:12}"
+          fail=0
+          for repo in $SATELLITES; do
+            echo "::group::$repo"
+            base=$(gh api "repos/autom8y/$repo" -q .default_branch)
+            headsha=$(gh api "repos/autom8y/$repo/git/ref/heads/$base" -q .object.sha)
+            blobsha=$(gh api "repos/autom8y/$repo/contents/$WF_PATH?ref=$base" -q .sha)
+            gh api "repos/autom8y/$repo/contents/$WF_PATH?ref=$base" \
+              -H "Accept: application/vnd.github.raw" > cur.yml
+            sed -E \
+              -e "s|satellite-ci-reusable\.yml@[0-9a-f]{40}|satellite-ci-reusable.yml@${NEW_SHA}|g" \
+              -e "s|(autom8y_workflows_sha: )[0-9a-f]{40}|\1${NEW_SHA}|g" \
+              cur.yml > new.yml
+            if cmp -s cur.yml new.yml; then
+              echo "already current at ${NEW_SHA:0:12}; skip"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would bump $repo to ${NEW_SHA:0:12}"
+              echo "::endgroup::"
+              continue
+            fi
+            gh api --method POST "repos/autom8y/$repo/git/refs" \
+              -f ref="refs/heads/$branch" -f sha="$headsha" >/dev/null 2>&1 || true
+            content=$(base64 < new.yml | tr -d '\n')
+            gh api --method PUT "repos/autom8y/$repo/contents/$WF_PATH" \
+              -f message="ci(deps): bump satellite-ci-reusable.yml + autom8y_workflows_sha to ${NEW_SHA:0:12}" \
+              -f content="$content" -f sha="$blobsha" -f branch="$branch" >/dev/null
+            url=$(gh api --method POST "repos/autom8y/$repo/pulls" \
+              -f title="ci(deps): bump satellite-ci-reusable.yml pin to ${NEW_SHA:0:12}" \
+              -f head="$branch" -f base="$base" \
+              -f body="Automated lockstep bump of the satellite-ci-reusable.yml pin and the autom8y_workflows_sha input to autom8y-workflows@${NEW_SHA}. Opened by the propagate-reusable-pin workflow. Do not auto-merge." \
+              -q .html_url 2>/dev/null) || { echo "PR open failed (branch may already exist) for $repo"; fail=1; echo "::endgroup::"; continue; }
+            echo "opened: $url"
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::warning::one or more satellites failed to receive a bump PR; see logs"
+          fi
