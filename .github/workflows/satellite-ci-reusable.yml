@@ -213,6 +213,18 @@ on:
         type: boolean
         default: false
 
+      # --- Optional: Aggregate coverage gate (sharded callers) ---
+      # When test_splits > 1, per-shard --cov-fail-under is meaningless (each
+      # shard sees ~1/N of the package). Set coverage_threshold: 0 and wire
+      # coverage_threshold_aggregate to the true threshold; the coverage-aggregate
+      # job combines all shard .coverage files and enforces --fail-under on the
+      # merged number. Default 0 = disabled (back-compat; no behaviour change for
+      # callers that do not pass this input).
+      coverage_threshold_aggregate:
+        description: 'Aggregate coverage threshold for sharded runs. Only used when test_splits > 1. 0 = disabled (default). Set to the real threshold (e.g. 87) for satellites that shard their test suite.'
+        type: number
+        default: 0
+
       # --- Optional: Test job timeout ---
       test_timeout:
         description: 'Timeout in minutes for the test job (default: 20)'
@@ -742,6 +754,19 @@ jobs:
             uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }}
           fi
 
+      # Aggregate coverage: upload the .coverage binary produced by this shard
+      # so the coverage-aggregate job can combine all shards and enforce the
+      # real --fail-under threshold on the merged number. Only uploaded when
+      # sharding is active AND coverage_threshold_aggregate > 0 (opt-in).
+      - name: Upload shard coverage data
+        if: always() && inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-data-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: .coverage
+          retention-days: 1
+          if-no-files-found: warn
+
       # Sprint 2 (FR-2, NFR-2): publish per-shard pytest duration output so
       # downstream tooling (durations-refresh weekly job, QA trailing-10-run
       # review) can audit shard balance. Only uploaded when sharding is active
@@ -761,6 +786,49 @@ jobs:
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  coverage-aggregate:
+    name: Aggregate Coverage Gate
+    # Only runs for sharded callers that opt into the aggregate threshold.
+    # Default-off (coverage_threshold_aggregate: 0) — no existing caller breaks.
+    if: inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Download all shard coverage data
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: coverage-data-shard-*-${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Install coverage tool
+        run: pip install --quiet coverage
+
+      - name: Combine shard coverage files
+        run: |
+          set -euo pipefail
+          # download-artifact v4 with merge-multiple:true places all artifacts
+          # in the current directory. List what landed and combine all .coverage*
+          # files (each shard uploaded one named .coverage).
+          echo "Coverage files found:"
+          find . -name ".coverage*" | sort
+          # Use mapfile to avoid SC2046 word-splitting on paths
+          mapfile -t COV_FILES < <(find . -name ".coverage*")
+          coverage combine --keep "${COV_FILES[@]}"
+
+      - name: Enforce aggregate coverage threshold
+        env:
+          COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold_aggregate }}
+          COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
+        run: |
+          set -euo pipefail
+          echo "Aggregate coverage report (threshold: ${COVERAGE_THRESHOLD}%):"
+          coverage report --include="${COVERAGE_PACKAGE}/*" --fail-under="${COVERAGE_THRESHOLD}" | tee /tmp/coverage-report.txt
+          echo "### Aggregate Coverage Gate PASS (${COVERAGE_THRESHOLD}% threshold)" >> "$GITHUB_STEP_SUMMARY"
+          tail -3 /tmp/coverage-report.txt >> "$GITHUB_STEP_SUMMARY"
 
   integration:
     name: Integration Tests
