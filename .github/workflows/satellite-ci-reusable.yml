@@ -791,7 +791,7 @@ jobs:
     name: Aggregate Coverage Gate
     # Only runs for sharded callers that opt into the aggregate threshold.
     # Default-off (coverage_threshold_aggregate: 0) — no existing caller breaks.
-    if: inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0
+    if: inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 5
