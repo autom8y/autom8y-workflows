@@ -764,8 +764,15 @@ jobs:
         with:
           name: coverage-data-shard-${{ matrix.shard }}-${{ github.run_id }}
           path: .coverage
+          # .coverage is a dotfile; actions/upload-artifact >=v4.4 excludes hidden
+          # files by default (GHSA-6q4m hidden-files change). Without this the
+          # artifact uploads nothing ("No files were found with the provided path:
+          # .coverage") and the coverage-aggregate job downloads 0 shards.
+          include-hidden-files: true
           retention-days: 1
-          if-no-files-found: warn
+          # The aggregate gate depends on EVERY shard's data. A missing shard must
+          # fail loudly here, not silently no-op into a lying-green gate.
+          if-no-files-found: error
 
       # Sprint 2 (FR-2, NFR-2): publish per-shard pytest duration output so
       # downstream tooling (durations-refresh weekly job, QA trailing-10-run
@@ -777,7 +784,10 @@ jobs:
         with:
           name: pytest-durations-shard-${{ matrix.shard }}-${{ github.run_id }}
           path: .pytest-shard-durations.txt
+          include-hidden-files: true  # dotfile — see "Upload shard coverage data"
           retention-days: 14
+          # `warn` (not `error`) is deliberate: durations are an advisory audit
+          # artifact, not gate-blocking — unlike the coverage shard above.
           if-no-files-found: warn
 
       - name: Upload coverage
@@ -798,35 +808,62 @@ jobs:
     permissions:
       contents: read
     steps:
+      # `coverage report` re-parses each measured source file to count statements,
+      # and the shard .coverage data records ABSOLUTE paths
+      # (/home/runner/work/<repo>/<repo>/src/...). github.workspace is deterministic
+      # per repo, so checking out the caller repo here places the source at exactly
+      # those paths — without this, report fails with "No source for code".
+      - name: Checkout (source needed for coverage report)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Pin to the SAME commit the shards measured, so coverage report re-parses
+          # identical source — statement counts must line up with the recorded data.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Download all shard coverage data
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: coverage-data-shard-*-${{ github.run_id }}
-          merge-multiple: true
+          # merge-multiple:false (default) is REQUIRED here: every shard uploads a
+          # file literally named `.coverage`, so merging into one dir would collide
+          # (last-wins) and only one shard's data would survive. Keeping each in its
+          # own artifact subdir lets the recursive find below gather all of them.
+          path: _shard-coverage
 
       - name: Install coverage tool
-        run: pip install --quiet coverage
+        # Major-pin: a coverage 8.x data-schema bump would make `combine` silently
+        # drop the shards' v7 data (CoverageWarning, exit 0) and under-count.
+        run: pip install --quiet "coverage>=7,<8"
 
       - name: Combine shard coverage files
         run: |
           set -euo pipefail
-          # download-artifact v4 with merge-multiple:true places all artifacts
-          # in the current directory. List what landed and combine all .coverage*
-          # files (each shard uploaded one named .coverage).
           echo "Coverage files found:"
-          find . -name ".coverage*" | sort
-          # Use mapfile to avoid SC2046 word-splitting on paths
-          mapfile -t COV_FILES < <(find . -name ".coverage*")
+          find _shard-coverage -name ".coverage*" | sort
+          # mapfile avoids SC2046 word-splitting on paths
+          mapfile -t COV_FILES < <(find _shard-coverage -name ".coverage*")
+          if [ "${#COV_FILES[@]}" -eq 0 ]; then
+            echo "::error::No shard .coverage data downloaded — the aggregate gate cannot run (check the shard upload step)."
+            exit 1
+          fi
           coverage combine --keep "${COV_FILES[@]}"
+          # Fail closed if combine produced no usable data (all shards dropped by a
+          # schema skew or corruption) — never enforce on an empty denominator.
+          python -c "import coverage; d=coverage.CoverageData(); d.read(); n=len(d.measured_files()); print(f'combined measured files: {n}'); raise SystemExit(0 if n else 1)"
 
       - name: Enforce aggregate coverage threshold
         env:
           COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold_aggregate }}
-          COVERAGE_PACKAGE: ${{ inputs.coverage_package }}
         run: |
           set -euo pipefail
           echo "Aggregate coverage report (threshold: ${COVERAGE_THRESHOLD}%):"
-          coverage report --include="${COVERAGE_PACKAGE}/*" --fail-under="${COVERAGE_THRESHOLD}" | tee /tmp/coverage-report.txt
+          # No --include needed: the shard data is already scoped to the package via
+          # each shard's --cov + [tool.coverage.run] source. The previous
+          # --include="<pkg>/*" matched nothing against the absolute stored paths
+          # ("No data to report"). The checked-out repo's pyproject supplies
+          # [tool.coverage.report] (exclude_lines etc.).
+          coverage report --fail-under="${COVERAGE_THRESHOLD}" | tee /tmp/coverage-report.txt
           echo "### Aggregate Coverage Gate PASS (${COVERAGE_THRESHOLD}% threshold)" >> "$GITHUB_STEP_SUMMARY"
           tail -3 /tmp/coverage-report.txt >> "$GITHUB_STEP_SUMMARY"
 
