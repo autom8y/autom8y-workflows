@@ -284,10 +284,32 @@ jobs:
       - name: Get CodeArtifact auth token
         id: codeartifact
         run: |
-          TOKEN=$(aws codeartifact get-authorization-token \
-            --domain autom8y \
-            --query authorizationToken \
-            --output text)
+          # Retry the token fetch (CodeArtifact connect-timeout flake class, FINDING-3):
+          # a bare `aws codeartifact get-authorization-token` with no retry/timeouts
+          # exits 255 on a connect-timeout and kills the job PRE-check (the PR #121
+          # flake). 3 attempts × 5s backoff, with explicit CLI connect/read timeouts so
+          # a stuck connection FAILS FAST into the retry instead of hanging. The `if`
+          # guard (not `TOKEN=$(...)` bare) keeps the loop alive under `set -e`; a
+          # final non-empty assertion HARD-FAILS so a genuinely unreachable
+          # CodeArtifact still blocks (the retry hides transient flakes, not outages).
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
@@ -505,10 +527,32 @@ jobs:
       - name: Get CodeArtifact auth token
         id: codeartifact
         run: |
-          TOKEN=$(aws codeartifact get-authorization-token \
-            --domain autom8y \
-            --query authorizationToken \
-            --output text)
+          # Retry the token fetch (CodeArtifact connect-timeout flake class, FINDING-3):
+          # a bare `aws codeartifact get-authorization-token` with no retry/timeouts
+          # exits 255 on a connect-timeout and kills the job PRE-check (the PR #121
+          # flake). 3 attempts × 5s backoff, with explicit CLI connect/read timeouts so
+          # a stuck connection FAILS FAST into the retry instead of hanging. The `if`
+          # guard (not `TOKEN=$(...)` bare) keeps the loop alive under `set -e`; a
+          # final non-empty assertion HARD-FAILS so a genuinely unreachable
+          # CodeArtifact still blocks (the retry hides transient flakes, not outages).
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
@@ -911,10 +955,32 @@ jobs:
       - name: Get CodeArtifact auth token
         id: codeartifact
         run: |
-          TOKEN=$(aws codeartifact get-authorization-token \
-            --domain autom8y \
-            --query authorizationToken \
-            --output text)
+          # Retry the token fetch (CodeArtifact connect-timeout flake class, FINDING-3):
+          # a bare `aws codeartifact get-authorization-token` with no retry/timeouts
+          # exits 255 on a connect-timeout and kills the job PRE-check (the PR #121
+          # flake). 3 attempts × 5s backoff, with explicit CLI connect/read timeouts so
+          # a stuck connection FAILS FAST into the retry instead of hanging. The `if`
+          # guard (not `TOKEN=$(...)` bare) keeps the loop alive under `set -e`; a
+          # final non-empty assertion HARD-FAILS so a genuinely unreachable
+          # CodeArtifact still blocks (the retry hides transient flakes, not outages).
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
@@ -987,10 +1053,32 @@ jobs:
       - name: Get CodeArtifact auth token
         id: codeartifact
         run: |
-          TOKEN=$(aws codeartifact get-authorization-token \
-            --domain autom8y \
-            --query authorizationToken \
-            --output text)
+          # Retry the token fetch (CodeArtifact connect-timeout flake class, FINDING-3):
+          # a bare `aws codeartifact get-authorization-token` with no retry/timeouts
+          # exits 255 on a connect-timeout and kills the job PRE-check (the PR #121
+          # flake). 3 attempts × 5s backoff, with explicit CLI connect/read timeouts so
+          # a stuck connection FAILS FAST into the retry instead of hanging. The `if`
+          # guard (not `TOKEN=$(...)` bare) keeps the loop alive under `set -e`; a
+          # final non-empty assertion HARD-FAILS so a genuinely unreachable
+          # CodeArtifact still blocks (the retry hides transient flakes, not outages).
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
@@ -1194,10 +1282,32 @@ jobs:
       - name: Get CodeArtifact auth token
         id: codeartifact
         run: |
-          TOKEN=$(aws codeartifact get-authorization-token \
-            --domain autom8y \
-            --query authorizationToken \
-            --output text)
+          # Retry the token fetch (CodeArtifact connect-timeout flake class, FINDING-3):
+          # a bare `aws codeartifact get-authorization-token` with no retry/timeouts
+          # exits 255 on a connect-timeout and kills the job PRE-check (the PR #121
+          # flake). 3 attempts × 5s backoff, with explicit CLI connect/read timeouts so
+          # a stuck connection FAILS FAST into the retry instead of hanging. The `if`
+          # guard (not `TOKEN=$(...)` bare) keeps the loop alive under `set -e`; a
+          # final non-empty assertion HARD-FAILS so a genuinely unreachable
+          # CodeArtifact still blocks (the retry hides transient flakes, not outages).
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
