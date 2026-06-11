@@ -385,8 +385,16 @@ jobs:
           # trusted shell var, not a templated workflow input) so no GitHub Actions
           # expression is interpolated into the shell (zizmor: code-injection-safe).
           CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
-          uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
+          # --all-extras is LOAD-BEARING: without it the export omits extras-only
+          # subtrees (e.g. autom8y-auth lives in the data repo's [api] extra), so
+          # the force-reinstall re-resolved that subtree UNCONSTRAINED and dragged
+          # cryptography 46.0.5->48.0.1 + pyjwt 2.12.0->2.13.0 (2026-06-10 runs
+          # 27292362248/27294677657 -- the consumer-gate shard-1 hang). stderr is
+          # NOT discarded: a failed export must fail this step loudly, never
+          # produce a silent partial constraints file.
+          uv export --no-sources --no-emit-project --no-hashes --all-extras --format requirements-txt \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
+          echo "candidate-constraints: $(wc -l < _candidate-constraints.txt) pinned requirements"
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Check formatting
