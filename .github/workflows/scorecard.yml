@@ -18,6 +18,8 @@ jobs:
       issues: read
       pull-requests: read
       checks: read
-    uses: autom8y/autom8y-workflows/.github/workflows/security-scorecard.yml@c77acb0cf9e48b17f08180d54e24086016706856
+    # Local reference (same-repo) -- consistent with dependency-review.yml,
+    # gitleaks.yml, trufflehog-scan.yml, zizmor.yml; never pin-stale again.
+    uses: ./.github/workflows/security-scorecard.yml
     with:
       publish_results: false
