@@ -392,7 +392,13 @@ jobs:
           # 27292362248/27294677657 -- the consumer-gate shard-1 hang). stderr is
           # NOT discarded: a failed export must fail this step loudly, never
           # produce a silent partial constraints file.
-          uv export --no-sources --no-emit-project --no-hashes --all-extras --format requirements-txt \
+          # --no-emit-workspace (not just --no-emit-project): a satellite with
+          # local workspace members (e.g. autom8y-data's packages/autom8-dev-data)
+          # otherwise exports them as bare file:// lines, which uv pip rejects as
+          # "Unnamed requirements are not allowed as constraints" (data leg of
+          # run 27409477576). Workspace members are local; constraints must pin
+          # registry packages only.
+          uv export --no-sources --no-emit-workspace --no-hashes --all-extras --format requirements-txt \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           echo "candidate-constraints: $(wc -l < _candidate-constraints.txt) pinned requirements"
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
@@ -718,7 +724,9 @@ jobs:
           # trusted shell var, not a templated workflow input) so no GitHub Actions
           # expression is interpolated into the shell (zizmor: code-injection-safe).
           CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
-          uv export --no-sources --no-emit-project --no-hashes --format requirements-txt 2>/dev/null \
+          # --no-emit-workspace: see the lint-job block — local workspace members
+          # export as bare file:// lines that uv pip rejects as constraints.
+          uv export --no-sources --no-emit-workspace --no-hashes --format requirements-txt 2>/dev/null \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
