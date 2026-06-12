@@ -726,8 +726,16 @@ jobs:
           CANDIDATE_PKG=$(basename "$CANDIDATE" | sed -E 's/-[0-9].*$//; s/_/-/g')
           # --no-emit-workspace: see the lint-job block — local workspace members
           # export as bare file:// lines that uv pip rejects as constraints.
-          uv export --no-sources --no-emit-workspace --no-hashes --format requirements-txt 2>/dev/null \
+          # --all-extras: the 2026-06-10 shard-hang fix (see the lint-job block —
+          # without it, extras-only subtrees like a satellite's [api] extra are
+          # omitted, so the force-reinstall re-resolves them UNCONSTRAINED and
+          # drags crypto/jwt out of lockstep) was applied only to the lint job;
+          # this test-job export carried the same latent gap. stderr no longer
+          # discarded: a failed export must fail loudly, never produce a silent
+          # partial constraints file.
+          uv export --no-sources --no-emit-workspace --no-hashes --all-extras --format requirements-txt \
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
+          echo "candidate-constraints: $(wc -l < _candidate-constraints.txt) pinned requirements"
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
 
       - name: Build pytest arguments
