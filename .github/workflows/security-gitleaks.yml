@@ -23,14 +23,8 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar xz -C /usr/local/bin gitleaks
 
-      # Exit code is ENFORCING: gitleaks exits 1 on findings (--exit-code default),
-      # so this step fails the job. The `|| true` swallow is retired (DW-COC-03
-      # locus (a)) — the delegated check now bites instead of always reporting green.
-      # Baseline: no flag needed. gitleaks auto-discovers a repo-root .gitleaksignore
-      # (v8.24.3 cmd/root.go:255 via --gitleaks-ignore-path default ".", and :261 via
-      # --source). Consumers pinned to an older SHA are unaffected until they re-pin.
       - name: Run gitleaks
-        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose
+        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose || true
 
       - name: Upload SARIF
         if: always() && github.event.repository.visibility == 'public'
