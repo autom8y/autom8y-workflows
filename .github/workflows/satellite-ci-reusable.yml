@@ -619,7 +619,10 @@ jobs:
           echo "Resolved shard list for test_splits=${TEST_SPLITS}: ${LIST}"
 
   test:
-    needs: matrix-prep
+    needs: [matrix-prep, lint]
+    # Keep shard checks running and failing on lint failure. A bare dependency would
+    # skip required shards, which can satisfy branch protection as skipped.
+    if: ${{ !cancelled() && needs.matrix-prep.result == 'success' }}
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
     runs-on: ${{ inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.test_timeout }}
@@ -632,6 +635,12 @@ jobs:
         shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list) }}
 
     steps:
+      - name: Fail shard when lint did not succeed
+        if: needs.lint.result != 'success'
+        run: |
+          echo 'Lint did not succeed; failing this required Test shard before checkout, authentication, cache access, or dependency installation.'
+          exit 1
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -974,7 +983,7 @@ jobs:
       # real --fail-under threshold on the merged number. Only uploaded when
       # sharding is active AND coverage_threshold_aggregate > 0 (opt-in).
       - name: Upload shard coverage data
-        if: always() && inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true
+        if: always() && needs.lint.result == 'success' && inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: coverage-data-shard-${{ matrix.shard }}-${{ github.run_id }}
@@ -994,7 +1003,7 @@ jobs:
       # review) can audit shard balance. Only uploaded when sharding is active
       # to avoid polluting artifact storage for unaffected satellites.
       - name: Upload shard durations
-        if: always() && inputs.test_splits > 1
+        if: always() && needs.lint.result == 'success' && inputs.test_splits > 1
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: pytest-durations-shard-${{ matrix.shard }}-${{ github.run_id }}
