@@ -1317,24 +1317,50 @@ jobs:
       - name: Install dependencies
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
+      # W7b U5b (recon row R-6): this step used to carry `continue-on-error: true`.
+      # Every non-zero pytest exit therefore left the job green. That included
+      # exit 4, a usage error in which no test runs at all (for example
+      # `--timeout` without pytest-timeout installed). Now any non-zero exit
+      # fails the job. The pytest command line is unchanged, so the same tests
+      # are selected. The wrapper only records the exit code for the report
+      # step.
       - name: Run integration tests
         id: integration-tests
-        run: uv run --no-sources pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
-        continue-on-error: true
+        run: |
+          set +e
+          uv run --no-sources pytest tests/ -m "integration" -v --timeout=${{ inputs.integration_timeout }}
+          rc=$?
+          echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
+          exit "${rc}"
 
       - name: Report integration test results
         if: always() && steps.integration-tests.outcome != 'skipped'
+        env:
+          OUTCOME: ${{ steps.integration-tests.outcome }}
+          EXIT_CODE: ${{ steps.integration-tests.outputs.exit_code }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
-          if [ "${{ steps.integration-tests.outcome }}" = "failure" ]; then
-            echo "## :x: Integration Tests FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Integration tests failed on \`${{ github.repository }}\` @ \`${{ github.sha }}\`." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The job reports success because \`continue-on-error: true\` is set." >> $GITHUB_STEP_SUMMARY
-            echo "Review the integration test logs above for failure details." >> $GITHUB_STEP_SUMMARY
-            echo "::warning title=Integration Tests Failed::Integration tests failed but were marked advisory (continue-on-error). Review logs for details."
+          if [ "${OUTCOME}" = "failure" ]; then
+            case "${EXIT_CODE}" in
+              1) meaning="tests failed" ;;
+              2) meaning="test run interrupted" ;;
+              3) meaning="pytest internal error" ;;
+              4) meaning="usage error; no tests ran, e.g. an unrecognized option" ;;
+              5) meaning="no tests were collected" ;;
+              "") meaning="the step failed before pytest returned" ;;
+              *) meaning="unexpected exit code" ;;
+            esac
+            {
+              echo "## :x: Integration Tests FAILED"
+              echo ""
+              echo "Integration tests failed on \`${REPO}\` @ \`${SHA}\`: pytest exit code ${EXIT_CODE:-none} (${meaning})."
+              echo ""
+              echo "Any non-zero pytest exit fails this job. Review the integration test logs above for details."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Integration Tests Failed::pytest exited ${EXIT_CODE:-none} (${meaning}). Review logs for details."
           else
-            echo "## :white_check_mark: Integration Tests Passed" >> $GITHUB_STEP_SUMMARY
+            echo "## :white_check_mark: Integration Tests Passed" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Scan retained uv cache for credentials
