@@ -24,7 +24,7 @@ jobs:
             | tar xz -C /usr/local/bin gitleaks
 
       - name: Run gitleaks
-        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose || true
+        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --redact || true
 
       - name: Upload SARIF
         if: always() && github.event.repository.visibility == 'public'
