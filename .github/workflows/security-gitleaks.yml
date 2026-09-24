@@ -2,6 +2,17 @@ name: "Security: Gitleaks Secrets Scan"
 
 on:
   workflow_call:
+    inputs:
+      baseline-path:
+        description: >-
+          Optional. Path, relative to the caller repository root, of a gitleaks
+          JSON baseline report. Findings listed in it are ignored; any other
+          finding fails the job. Generate it with the same gitleaks version and
+          with --redact (an unredacted baseline is refused). Empty (the default)
+          means no baseline. A set path that does not exist fails the job.
+        type: string
+        required: false
+        default: ''
 
 jobs:
   gitleaks:
@@ -20,17 +31,89 @@ jobs:
       - name: Install gitleaks
         run: |
           GITLEAKS_VERSION=8.24.3
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar xz -C /usr/local/bin gitleaks
+          GITLEAKS_SHA256=9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C /usr/local/bin gitleaks
 
       # Exit code is ENFORCING: gitleaks exits 1 on findings (--exit-code default),
-      # so this step fails the job. The `|| true` swallow is retired (DW-COC-03
-      # locus (a)) — the delegated check now bites instead of always reporting green.
-      # Baseline: no flag needed. gitleaks auto-discovers a repo-root .gitleaksignore
-      # (v8.24.3 cmd/root.go:255 via --gitleaks-ignore-path default ".", and :261 via
-      # --source). Consumers pinned to an older SHA are unaffected until they re-pin.
+      # so this step fails the job.
+      # --redact: findings are redacted before they are matched against the
+      # baseline or written to the SARIF report.
+      # No --verbose: gitleaks does not print findings. The "List findings" step
+      # prints each one as rule, file:line and commit, read from the SARIF report.
+      # Suppression: a repo-root .gitleaksignore (commit-scoped fingerprints) is
+      # auto-discovered. A baseline is used only when baseline-path is set; it
+      # must be a redacted report:
+      #   gitleaks detect --source . --redact --report-format json \
+      #     --report-path <path>
+      # Extra rule: the internal service API key formats are appended to the scan
+      # config (the caller's .gitleaks.toml, or the default config if there is
+      # none). Only the runner's checkout is changed; git history is scanned.
       - name: Run gitleaks
-        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --redact
+        env:
+          BASELINE_PATH: ${{ inputs.baseline-path }}
+        run: |
+          if ! grep -qs '^id = "autom8y-service-api-key"' .gitleaks.toml; then
+            if [ -f .gitleaks.toml ]; then
+              echo >> .gitleaks.toml
+            else
+              printf '[extend]\nuseDefault = true\n' > .gitleaks.toml
+            fi
+            cat >> .gitleaks.toml <<'EOF'
+          [[rules]]
+          id = "autom8y-service-api-key"
+          description = "Internal service API key"
+          regex = '''(?:^|[^A-Za-z0-9_-])((?:sk_(?:prod|staging|local|dev|test)|a8(?:sa|ak|sk))_[A-Za-z0-9_-]{32,64})(?:[^A-Za-z0-9_-]|$)'''
+          secretGroup = 1
+          entropy = 3.0
+          keywords = ["sk_prod_", "sk_staging_", "sk_local_", "sk_dev_", "sk_test_", "a8sa_", "a8ak_", "a8sk_"]
+          [[rules.allowlists]]
+          description = "Placeholder key bodies"
+          regexes = [
+            '''(?i)^(?:sk_[a-z]+|a8[a-z]{2})_.*(?:abcdef|bcdefg|cdefgh|defghi|efghij|fghijk|ghijkl|hijklm|ijklmn|jklmno|klmnop|lmnopq|mnopqr|nopqrs|opqrst|pqrstu|qrstuv|rstuvw|stuvwx|tuvwxy|uvwxyz|012345|123456|234567|345678|456789)''',
+            '''(?i)^(?:sk_[a-z]+|a8[a-z]{2})_.*(?:fake|dummy|example|sample|placeholder|changeme|secret|test|your)''',
+          ]
+          EOF
+          else
+            echo "::warning::.gitleaks.toml defines autom8y-service-api-key, which replaces the shared rule."
+          fi
+          args=(detect --source . --redact --report-format sarif --report-path gitleaks-results.sarif)
+          if [ -n "$BASELINE_PATH" ]; then
+            if [ ! -f "$BASELINE_PATH" ]; then
+              echo "::error::Baseline $BASELINE_PATH not found."
+              exit 1
+            fi
+            if ! jq -e 'type == "array" and all(.[]; .Secret == "REDACTED" and (.Match | type == "string" and contains("REDACTED")))' "$BASELINE_PATH" >/dev/null; then
+              echo "::error::Baseline $BASELINE_PATH is not a redacted gitleaks JSON report. Regenerate it with --redact."
+              exit 1
+            fi
+            echo "Using baseline $BASELINE_PATH ($(jq length "$BASELINE_PATH") entries)"
+            args+=(--baseline-path "$BASELINE_PATH")
+          elif [ -f .gitleaksignore ]; then
+            echo "No baseline; findings not listed in .gitleaksignore fail the job."
+          else
+            echo "No baseline; every finding fails the job."
+          fi
+          gitleaks "${args[@]}"
+
+      - name: List findings
+        if: always()
+        run: |
+          [ -s gitleaks-results.sarif ] || exit 0
+          findings=$(jq -r '.runs[].results[]? | [.ruleId, "\(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)", ((.partialFingerprints.commitSha // "")[0:12])] | @tsv' gitleaks-results.sarif)
+          [ -n "$findings" ] || exit 0
+          echo "Findings (rule, file:line, commit):"
+          printf '%s\n' "$findings"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### gitleaks findings (rule, file:line, commit)"
+              echo
+              echo "| Rule | Location | Commit |"
+              echo "|---|---|---|"
+              printf '%s\n' "$findings" | awk -F '\t' '{ printf "| %s | `%s` | `%s` |\n", $1, $2, $3 }'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload SARIF
         if: always() && github.event.repository.visibility == 'public'
