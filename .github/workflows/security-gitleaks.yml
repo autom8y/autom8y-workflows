@@ -45,11 +45,30 @@ jobs:
       #   gitleaks detect --source . --redact --report-format json \
       #     --report-path .gitleaks-baseline.json
       # A repo-root .gitleaksignore is still auto-discovered as before.
+      # Extra rule: the internal service API key format is appended to the scan
+      # config (the caller's .gitleaks.toml, or the default config if there is
+      # none). Only the runner's checkout is changed; git history is scanned.
       - name: Run gitleaks
         env:
           BASELINE_PATH: ${{ inputs.baseline-path }}
           DEFAULT_BASELINE_PATH: .gitleaks-baseline.json
         run: |
+          if ! grep -qs '^id = "autom8y-service-api-key"' .gitleaks.toml; then
+            if [ -f .gitleaks.toml ]; then
+              echo >> .gitleaks.toml
+            else
+              printf '[extend]\nuseDefault = true\n' > .gitleaks.toml
+            fi
+            cat >> .gitleaks.toml <<'EOF'
+          [[rules]]
+          id = "autom8y-service-api-key"
+          description = "Internal service API key"
+          regex = '''(?:^|[^A-Za-z0-9_-])(sk_(?:prod|staging|local|dev|test)_[A-Za-z0-9_-]{32,64})(?:[^A-Za-z0-9_-]|$)'''
+          secretGroup = 1
+          entropy = 3.5
+          keywords = ["sk_prod_", "sk_staging_", "sk_local_", "sk_dev_", "sk_test_"]
+          EOF
+          fi
           args=(detect --source . --redact --report-format sarif --report-path gitleaks-results.sarif --verbose)
           if [ -n "$BASELINE_PATH" ] && [ -f "$BASELINE_PATH" ]; then
             if ! jq -e 'type == "array" and all(.[]; .Secret == "REDACTED")' "$BASELINE_PATH" >/dev/null; then

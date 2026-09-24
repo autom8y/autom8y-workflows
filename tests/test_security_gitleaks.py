@@ -91,6 +91,22 @@ def _fake_secret_key() -> str:
             return value
 
 
+def _random(alphabet: str, n: int) -> str:
+    while True:
+        value = "".join(secrets.choice(alphabet) for _ in range(n))
+        if _entropy(value) > 3.5:
+            return value
+
+
+ALNUM = string.ascii_letters + string.digits
+URLSAFE = ALNUM + "-_"
+SERVICE_RULE = "autom8y-service-api-key"
+
+
+def _prefixed(kind: str, env: str, body: str) -> str:
+    return kind + "_" + env + "_" + body
+
+
 def _gitleaks_bin() -> str | None:
     path = shutil.which("gitleaks")
     if path is None:
@@ -165,6 +181,14 @@ class Repo:
         )
         return proc.returncode, proc.stdout + proc.stderr
 
+    def plant_value(self, rel: str, value: str) -> str:
+        self.commit(rel, f"value: {value}\n", f"add {rel}")
+        return value
+
+    def sarif_rule_ids(self) -> set[str]:
+        sarif = json.loads((self.root / "gitleaks-results.sarif").read_text())
+        return {r["ruleId"] for run in sarif["runs"] for r in run.get("results", [])}
+
     def run_step(self, baseline_path: str | None = None, script: str | None = None) -> tuple[int, str]:
         step = _step(RUN_STEP)
         step_env = step.get("env", {})
@@ -226,6 +250,12 @@ class TestStaticContract:
         assert step["env"]["DEFAULT_BASELINE_PATH"] == inputs["baseline-path"]["default"]
         assert "${{" not in step["run"]
         assert '--baseline-path "$BASELINE_PATH"' in step["run"]
+
+    def test_service_key_rule_is_appended(self) -> None:
+        body = _step(RUN_STEP)["run"]
+        assert f'id = "{SERVICE_RULE}"' in body
+        assert "useDefault = true" in body
+        assert body.index(SERVICE_RULE) < body.index("args=(detect")
 
     def test_legacy_control_matches_pinned_history(self) -> None:
         assert "--redact" not in LEGACY_RUN and "|| true" in LEGACY_RUN
@@ -344,3 +374,65 @@ class TestBaselineGuards:
             contains=("Using baseline security/gitleaks-baseline.json",),
             values_absent=values,
         )
+
+
+class TestServiceKeyRule:
+    def test_service_key_is_caught_and_redacted(self, repo: Repo) -> None:
+        value = repo.plant_value("svc/env", _prefixed("sk", "prod", _random(ALNUM, 32)))
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, contains=("REDACTED",), values_absent=(value,))
+        assert SERVICE_RULE in repo.sarif_rule_ids()
+        sarif = (repo.root / "gitleaks-results.sarif").read_text()
+        _expect(sarif, what="SARIF report", values_absent=(value,))
+
+    def test_other_envs_and_urlsafe_keys_are_caught(self, repo: Repo) -> None:
+        values = (
+            repo.plant_value("svc/staging", _prefixed("sk", "staging", _random(ALNUM, 32))),
+            repo.plant_value("svc/local", _prefixed("sk", "local", _random(URLSAFE, 43))),
+        )
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, contains=("leaks found: 2",), values_absent=values)
+        assert repo.sarif_rule_ids() == {SERVICE_RULE}
+
+    def test_stripe_live_key_is_still_caught_by_the_stripe_rule(self, repo: Repo) -> None:
+        value = repo.plant_value("billing/env", _prefixed("sk", "live", _random(ALNUM, 32)))
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, contains=("REDACTED",), values_absent=(value,))
+        ids = repo.sarif_rule_ids()
+        assert "stripe-access-token" in ids and SERVICE_RULE not in ids
+
+    def test_31_character_near_miss_is_not_caught(self, repo: Repo) -> None:
+        repo.plant_value("svc/staging", _prefixed("sk", "staging", _random(ALNUM, 31)))
+        rc, log = repo.run_step()
+        assert rc == 0
+        _expect(log, contains=("no leaks found",))
+
+    def test_31_character_prod_near_miss_is_left_to_the_stripe_rule(self, repo: Repo) -> None:
+        repo.plant_value("svc/prod", _prefixed("sk", "prod", _random(ALNUM, 31)))
+        rc, _ = repo.run_step()
+        assert rc == 1
+        assert SERVICE_RULE not in repo.sarif_rule_ids()
+
+    def test_caller_config_is_kept(self, repo: Repo) -> None:
+        repo.commit(
+            ".gitleaks.toml",
+            "[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''^fixtures/''']\n",
+            "add config",
+        )
+        repo.plant_value("fixtures/env", _prefixed("sk", "staging", _random(ALNUM, 32)))
+        rc, log = repo.run_step()
+        assert rc == 0, "the caller's path allowlist was not honoured"
+        value = repo.plant_value("svc/env", _prefixed("sk", "staging", _random(ALNUM, 32)))
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, contains=("leaks found: 1",), values_absent=(value,))
+
+    def test_control_rule_absent_misses_staging_key(self, repo: Repo) -> None:
+        repo.plant_value("svc/staging", _prefixed("sk", "staging", _random(ALNUM, 32)))
+        body = _step(RUN_STEP)["run"]
+        without_rule = body[body.index("args=(detect"):]
+        rc, _ = repo.run_step(script=without_rule)
+        assert rc == 0, "control: the default rules alone should not catch this key"
