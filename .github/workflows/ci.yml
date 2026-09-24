@@ -57,7 +57,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Must match GITLEAKS_VERSION in security-gitleaks.yml; the tests fail on a mismatch.
+      # GITLEAKS_VERSION and GITLEAKS_SHA256 must match security-gitleaks.yml; the tests fail on a mismatch.
       - name: Install gitleaks
         run: |
           GITLEAKS_VERSION=8.24.3
