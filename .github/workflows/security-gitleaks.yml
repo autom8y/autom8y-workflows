@@ -2,6 +2,17 @@ name: "Security: Gitleaks Secrets Scan"
 
 on:
   workflow_call:
+    inputs:
+      baseline-path:
+        description: >-
+          Path, relative to the caller repository root, of a gitleaks JSON
+          baseline report. Findings listed in it are ignored; any other finding
+          fails the job. Generate it with the same gitleaks version and with
+          --redact (an unredacted baseline is refused). If the file does not
+          exist at the default path, no baseline is used.
+        type: string
+        required: false
+        default: .gitleaks-baseline.json
 
 jobs:
   gitleaks:
@@ -24,13 +35,36 @@ jobs:
             | tar xz -C /usr/local/bin gitleaks
 
       # Exit code is ENFORCING: gitleaks exits 1 on findings (--exit-code default),
-      # so this step fails the job. The `|| true` swallow is retired (DW-COC-03
-      # locus (a)) — the delegated check now bites instead of always reporting green.
-      # Baseline: no flag needed. gitleaks auto-discovers a repo-root .gitleaksignore
-      # (v8.24.3 cmd/root.go:255 via --gitleaks-ignore-path default ".", and :261 via
-      # --source). Consumers pinned to an older SHA are unaffected until they re-pin.
+      # so this step fails the job.
+      # --redact: findings are redacted before they are printed (--verbose), matched
+      # against the baseline, or written to the SARIF report. No secret value
+      # reaches the log or the report.
+      # Baseline: only findings absent from the caller's baseline fail the job.
+      # Because matching happens after redaction, the baseline must itself be a
+      # redacted report:
+      #   gitleaks detect --source . --redact --report-format json \
+      #     --report-path .gitleaks-baseline.json
+      # A repo-root .gitleaksignore is still auto-discovered as before.
       - name: Run gitleaks
-        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose
+        env:
+          BASELINE_PATH: ${{ inputs.baseline-path }}
+          DEFAULT_BASELINE_PATH: .gitleaks-baseline.json
+        run: |
+          args=(detect --source . --redact --report-format sarif --report-path gitleaks-results.sarif --verbose)
+          if [ -n "$BASELINE_PATH" ] && [ -f "$BASELINE_PATH" ]; then
+            if ! jq -e 'type == "array" and all(.[]; .Secret == "REDACTED")' "$BASELINE_PATH" >/dev/null; then
+              echo "::error::Baseline $BASELINE_PATH is not a redacted gitleaks JSON report. Regenerate it with --redact."
+              exit 1
+            fi
+            echo "Using baseline $BASELINE_PATH ($(jq length "$BASELINE_PATH") entries)"
+            args+=(--baseline-path "$BASELINE_PATH")
+          elif [ -n "$BASELINE_PATH" ] && [ "$BASELINE_PATH" != "$DEFAULT_BASELINE_PATH" ]; then
+            echo "::error::Baseline $BASELINE_PATH not found."
+            exit 1
+          else
+            echo "No baseline; every finding fails the job."
+          fi
+          gitleaks "${args[@]}"
 
       - name: Upload SARIF
         if: always() && github.event.repository.visibility == 'public'
