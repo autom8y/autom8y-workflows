@@ -354,6 +354,14 @@ class TestStaticContract:
         for field in ("snippet", "message", "Match", "Secret", "commitMessage", "email", "author"):
             assert field not in body, f"listing reads {field!r}"
 
+    def test_listing_reads_only_the_commit_fingerprint(self) -> None:
+        # partialFingerprints also carries the commit author, email and message.
+        body = _step(LIST_STEP)["run"]
+        refs = re.findall(r"partialFingerprints\S*", body)
+        assert refs, "listing does not read the commit fingerprint"
+        other = [r for r in refs if not r.startswith("partialFingerprints.commitSha")]
+        assert not other, f"listing reads other fingerprint fields: {other}"
+
     def test_scan_failure_is_not_swallowed(self) -> None:
         step = _step(RUN_STEP)
         assert "|| true" not in step["run"]
@@ -540,6 +548,37 @@ class TestSameLineNeighbours:
         assert rc == 1
         shown = _fragments(log, values[::2])
         assert shown == 2, f"control: --verbose showed fragments of only {shown} of 2 neighbours"
+
+
+class TestListingFields:
+    """The listing shows rule, location and commit; never commit metadata."""
+
+    def test_rows_have_three_fields_and_no_commit_metadata(self, repo: Repo) -> None:
+        author, email = "author-" + _random(ALNUM, 16), _random(ALNUM, 16).lower() + "@example.invalid"
+        message = "msg-" + _random(ALNUM, 24)
+        repo.env.update(GIT_AUTHOR_NAME=author, GIT_AUTHOR_EMAIL=email)
+        key_id, secret_key = _fake_key_id(), _fake_secret_key()
+        repo.commit(
+            "config/credentials",
+            f"[default]\naws_access_key_id = {key_id}\naws_secret_access_key = {secret_key}\n",
+            message,
+        )
+        rc, log = repo.run_step()
+        assert rc == 1
+        metadata = (author, email, message)
+        # Control: the report does carry the metadata, so its absence below means something.
+        assert all(m in repo.sarif() for m in metadata), "control: SARIF lacks the commit metadata"
+        header = "Findings (rule, file:line, commit):"
+        assert log.count(header) == 1
+        rows = [r for r in log.split(header, 1)[1].splitlines() if r.strip()]
+        assert len(rows) == 2
+        assert all(len(r.split("\t")) == 3 for r in rows), "listing rows are not exactly 3 fields"
+        cells = [r.count("|") for r in repo.summary().splitlines() if r.startswith("| ")]
+        assert cells and all(n == 4 for n in cells), "summary rows are not exactly 3 cells"
+        for surface, text in (("log", log), ("step summary", repo.summary())):
+            shown = [n for n, m in zip(("author", "email", "message"), metadata) if m in text]
+            assert not shown, f"{surface} shows commit {shown}"
+        _expect(log, values_absent=(key_id, secret_key))
 
 
 class TestBaselineGuards:
@@ -760,3 +799,35 @@ class TestServiceKeyRule:
         without_rule = body[body.index("args=(detect"):]
         rc, _ = repo.run_step(script=without_rule)
         assert rc == 0, "control: the default rules alone should not catch these keys"
+
+
+SHADOW_WARNING = "::warning::.gitleaks.toml defines autom8y-service-api-key"
+
+
+class TestShadowedServiceRule:
+    """A caller rule with the shared rule's id replaces it; the scan says so."""
+
+    @staticmethod
+    def _config(rule_id: str) -> str:
+        return (
+            "[extend]\nuseDefault = true\n\n[[rules]]\n"
+            f'id = "{rule_id}"\ndescription = "caller rule"\n'
+            "regex = '''zzqq[0-9]{40}'''\nkeywords = [\"zzqq\"]\n"
+        )
+
+    def test_shadowing_config_is_logged(self, repo: Repo) -> None:
+        repo.commit(".gitleaks.toml", self._config(SERVICE_RULE), "add config")
+        value = repo.plant_value("svc/env", _real_shaped(lambda: _a8("sa", secrets.token_urlsafe(32))))
+        rc, log = repo.run_step()
+        assert rc == 0, "control: the caller rule should replace the shared rule"
+        _expect(log, contains=(SHADOW_WARNING,), values_absent=(value,))
+
+    def test_no_warning_without_shadowing(self, repo: Repo) -> None:
+        value = repo.plant_value("svc/env", _real_shaped(lambda: _a8("sa", secrets.token_urlsafe(32))))
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, lacks=(SHADOW_WARNING,), values_absent=(value,))
+        repo.commit(".gitleaks.toml", self._config("caller-rule"), "add config")
+        rc, log = repo.run_step()
+        assert rc == 1
+        _expect(log, lacks=(SHADOW_WARNING,), values_absent=(value,))

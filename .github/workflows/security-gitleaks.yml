@@ -75,6 +75,8 @@ jobs:
             '''(?i)^(?:sk_[a-z]+|a8[a-z]{2})_.*(?:fake|dummy|example|sample|placeholder|changeme|secret|test|your)''',
           ]
           EOF
+          else
+            echo "::warning::.gitleaks.toml defines autom8y-service-api-key, which replaces the shared rule."
           fi
           args=(detect --source . --redact --report-format sarif --report-path gitleaks-results.sarif)
           if [ -n "$BASELINE_PATH" ]; then
