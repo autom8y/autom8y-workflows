@@ -2198,3 +2198,97 @@ jobs:
         with:
           repo-name: ${{ github.event.repository.name }}
           spec-path: ${{ github.workspace }}/.fleet-conformance-canonical/fleet-conformance-spec.yml
+
+  # PR-time CRITICAL vulnerability gate (W7b U3a, recon row R-3).
+  #
+  # Before this job, the only CRITICAL gate was autom8y's service-build.yml
+  # "Gate on CRITICAL vulnerabilities" step. It runs at image-build time, after
+  # the change is already on the satellite's main. This job applies the same
+  # policy at PR time, so a CRITICAL in the lockfile turns the PR red before it
+  # merges.
+  #
+  # Same policy as the build gate: trivy-action v0.35.0 (Trivy v0.69.3),
+  # severity CRITICAL, exit-code 1, vuln-type os,library, format table, and the
+  # monorepo `.trivyignore` fetched from autom8y/autom8y. Exemptions therefore
+  # go through one file for both gates.
+  #
+  # Scan target: this workflow builds no image, so the job scans a staging
+  # directory that holds only the satellite's uv.lock and pyproject.toml
+  # (`trivy fs`). Trivy's uv analyzer skips dev-only packages by default. That
+  # matches the images, which install with `uv sync --no-dev`. The lock is a
+  # superset of any single image's extras, so for packages the image installs
+  # as locked this gate is at least as strict as the build gate. OS packages,
+  # anything the base image installs outside the lock, and any version an
+  # unfrozen image build re-resolves stay covered by the build gate only.
+  #
+  # PR only: push and workflow_dispatch runs, including the sdk-publish
+  # consumer gate, skip this job. So a newly published CVE cannot stop a
+  # satellite's main-branch Test run and, through it, satellite-dispatch.
+  trivy-gate:
+    name: Trivy CRITICAL Gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      # autom8y/autom8y is private; the caller's GITHUB_TOKEN cannot read it.
+      # Same App-token pattern as the consumer-gate cross-repo download above,
+      # narrowed to contents:read on the one repository it reads.
+      - name: Generate App token for monorepo security policy
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+          permission-contents: read
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          persist-credentials: false
+
+      - name: Fetch security policy from monorepo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          repository: autom8y/autom8y
+          token: ${{ steps.app-token.outputs.token }}
+          sparse-checkout: '.trivyignore'
+          sparse-checkout-cone-mode: false
+          path: _monorepo_policy
+          persist-credentials: false
+
+      - name: Stage lockfile scan target
+        run: |
+          set -euo pipefail
+          if [ ! -f uv.lock ]; then
+            echo "::error title=Trivy CRITICAL Gate::uv.lock not found at the repository root; the gate has nothing to scan."
+            exit 1
+          fi
+          if [ ! -f _monorepo_policy/.trivyignore ]; then
+            echo "::error title=Trivy CRITICAL Gate::monorepo .trivyignore could not be fetched; refusing to scan without the shared exemption policy."
+            exit 1
+          fi
+          rm -rf _trivy_scan
+          mkdir _trivy_scan
+          cp uv.lock _trivy_scan/uv.lock
+          if [ -f pyproject.toml ]; then
+            cp pyproject.toml _trivy_scan/pyproject.toml
+          fi
+          cp _monorepo_policy/.trivyignore .trivyignore
+          echo "Applied .trivyignore ($(wc -l < .trivyignore) lines, $(grep -c '^CVE-' .trivyignore || true) exemptions)"
+          echo "Scan target: $(ls _trivy_scan | tr '\n' ' ')"
+
+      - name: Gate on CRITICAL vulnerabilities (lockfile)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '_trivy_scan'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+          vuln-type: 'os,library'
+          trivyignores: '.trivyignore'
+          version: 'v0.69.3'
