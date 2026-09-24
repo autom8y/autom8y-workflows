@@ -30,7 +30,7 @@ jobs:
       # (v8.24.3 cmd/root.go:255 via --gitleaks-ignore-path default ".", and :261 via
       # --source). Consumers pinned to an older SHA are unaffected until they re-pin.
       - name: Run gitleaks
-        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --verbose
+        run: gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --redact
 
       - name: Upload SARIF
         if: always() && github.event.repository.visibility == 'public'
