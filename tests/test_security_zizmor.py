@@ -124,7 +124,8 @@ class Tree:
         script.chmod(0o755)
 
     def run(self, script: str | None = None, fail_on: str = "none",
-            visibility: str = "private", head_repo: str = "") -> tuple[int, str]:
+            visibility: str = "private", head_repo: str = "",
+            extra_env: dict[str, str] | None = None) -> tuple[int, str]:
         jq_dir = str(Path(shutil.which("jq") or "jq").parent)
         env = {
             "PATH": os.pathsep.join(dict.fromkeys([str(self.bin), jq_dir, "/usr/bin", "/bin"])),
@@ -137,6 +138,7 @@ class Tree:
             "VISIBILITY": visibility,
             "HEAD_REPO": head_repo,
             "REPO": "org/repo",
+            **(extra_env or {}),
         }
         # The runner's default shell for `run:` steps is `bash -e {0}`.
         proc = subprocess.run(
@@ -354,18 +356,51 @@ def test_unknown_severity_is_red(tmp_path: Path, zizmor: str) -> None:
     assert "unreadable JSON output" in tree.summary_text()
 
 
-def test_skipped_inputs_never_pass(tmp_path: Path, zizmor: str) -> None:
+# Silences zizmor's log, including the warnings the skipped count reads.
+QUIET = {"RUST_LOG": "off"}
+# The strict flag removed, as if it stopped failing on skipped inputs.
+NO_STRICT = 'args=(); for a in "$@"; do [ "$a" = --strict-collection ] || args+=("$a"); done\nexec "$REAL" "${args[@]}"'
+
+
+def test_skipped_inputs_are_reported_without_a_threshold(tmp_path: Path, zizmor: str) -> None:
     """Every workflow unparseable plus a valid dependabot.yml: zizmor exits 0 with no findings."""
     tree = Tree(tmp_path, zizmor, dict(BROKEN), {".github/dependabot.yml": DEPENDABOT})
-    rc, out = tree.run(fail_on="informational")
-    assert rc == 1, out
+    rc, out = tree.run()
+    assert rc == 0, out
     summary = tree.summary_text()
     assert _count(summary) == 0 and _exit_code(summary) == 0
     assert "; 2 inputs skipped" in summary
-    assert "FAIL: inputs skipped" in summary
-    rc, out = tree.run()
-    assert rc == 0, out
     assert "::warning::zizmor: 0 findings" in out and "2 inputs skipped" in out
+
+
+def test_skipped_count_reads_the_warning_text(tmp_path: Path, zizmor: str) -> None:
+    """Control: with the log silenced the text-derived count reads 0."""
+    tree = Tree(tmp_path, zizmor, dict(BROKEN), {".github/dependabot.yml": DEPENDABOT})
+    rc, out = tree.run(extra_env=QUIET)
+    assert rc == 0, out
+    assert "; 0 inputs skipped" in tree.summary_text()
+
+
+@pytest.mark.parametrize("extra_env", [{}, QUIET], ids=["log", "quiet"])
+def test_skipped_inputs_fail_a_threshold(tmp_path: Path, zizmor: str, extra_env: dict[str, str]) -> None:
+    """A broken input beside a below-threshold finding is red, with or without the warning text."""
+    tree = Tree(tmp_path, zizmor, {"syntax.yml": BROKEN["syntax.yml"], "w.yml": BY_SEVERITY["medium"]})
+    rc, out = tree.run(fail_on="high", extra_env=extra_env)
+    assert rc == 1, out
+    assert "zizmor did not complete: exit code 1" in tree.summary_text()
+    # The same tree without the broken input passes at this threshold.
+    (tree.root / ".github" / "workflows" / "syntax.yml").unlink()
+    rc, out = tree.run(fail_on="high", extra_env=extra_env)
+    assert rc == 0, out
+
+
+def test_skipped_count_fails_a_threshold_without_strict(tmp_path: Path, zizmor: str) -> None:
+    """Second guard: if the strict flag stopped failing, the warning count still does."""
+    tree = Tree(tmp_path, zizmor, dict(BROKEN), {".github/dependabot.yml": DEPENDABOT})
+    tree.wrap(NO_STRICT)
+    rc, out = tree.run(fail_on="informational")
+    assert rc == 1, out
+    assert "FAIL: inputs skipped" in tree.summary_text()
 
 
 def test_skipped_inputs_are_counted_beside_findings(tmp_path: Path, zizmor: str) -> None:

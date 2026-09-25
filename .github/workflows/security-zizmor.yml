@@ -48,8 +48,12 @@ jobs:
             *) echo "::error::fail_on_severity must be none, informational, low, medium or high"; exit 1 ;;
           esac
 
+          # Under a threshold, an input zizmor cannot parse or validate makes
+          # it exit 1, without relying on the warning text counted below.
+          strict=()
+          if [ "$FAIL_ON" != none ]; then strict=(--strict-collection); fi
           rc=0
-          zizmor --format json . > "$RUNNER_TEMP/zizmor.json" 2> "$RUNNER_TEMP/zizmor.log" || rc=$?
+          zizmor --format json "${strict[@]}" . > "$RUNNER_TEMP/zizmor.json" 2> "$RUNNER_TEMP/zizmor.log" || rc=$?
           cat "$RUNNER_TEMP/zizmor.log" >&2
           sarif_rc=0
           zizmor --format sarif . > zizmor-results.sarif || sarif_rc=$?
