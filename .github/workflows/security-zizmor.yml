@@ -28,9 +28,9 @@ jobs:
       - name: Install zizmor
         run: pip install zizmor==1.23.1
 
-      # zizmor exits 0 (no findings), 10-14 (findings; the highest severity
-      # sets the code) or anything else on an error. SARIF output always exits
-      # 0 on findings, so the JSON run carries the exit code and the counts.
+      # zizmor 1.23.1 exits 0 (no findings), 11-14 (findings; the highest
+      # severity sets the code) or anything else on an error. SARIF output
+      # exits 0 on findings, so the JSON run carries the exit code and counts.
       - name: Run zizmor
         id: scan
         env:
@@ -49,7 +49,8 @@ jobs:
           esac
 
           rc=0
-          zizmor --format json . > "$RUNNER_TEMP/zizmor.json" || rc=$?
+          zizmor --format json . > "$RUNNER_TEMP/zizmor.json" 2> "$RUNNER_TEMP/zizmor.log" || rc=$?
+          cat "$RUNNER_TEMP/zizmor.log" >&2
           sarif_rc=0
           zizmor --format sarif . > zizmor-results.sarif || sarif_rc=$?
 
@@ -58,19 +59,22 @@ jobs:
             printf '### zizmor\n\nzizmor did not complete: %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           }
-          case "$rc" in 0 | 1[0-4]) ;; *) crash "exit code $rc" ;; esac
+          case "$rc" in 0 | 1[1-4]) ;; *) crash "exit code $rc" ;; esac
           [ "$sarif_rc" -eq 0 ] || crash "SARIF run exit code $sarif_rc"
 
-          # total high medium low informational unknown max-rank(0-4, -1 if none)
-          counts=$(jq -r '
-            [.[] | select(.ignored | not) | .determinations.severity] as $s
+          # total high medium low informational max-rank (1-4, 0 if none).
+          # jq -e fails on empty output, and an unknown severity is an error.
+          counts=$(jq -e -r '
+            [.[] | .determinations.severity] as $s
             | def n($x): [$s[] | select(. == $x)] | length;
-            [($s | length), n("High"), n("Medium"), n("Low"), n("Informational"), n("Unknown"),
-             ([$s[] | {"Unknown":0,"Informational":1,"Low":2,"Medium":3,"High":4}[.]] | max // -1)]
+            [($s | length), n("High"), n("Medium"), n("Low"), n("Informational"),
+             ([$s[] | {"Informational":1,"Low":2,"Medium":3,"High":4}[.] // error("unknown severity")] | max // 0)]
             | @tsv' "$RUNNER_TEMP/zizmor.json") || crash "unreadable JSON output"
-          read -r total high medium low info unknown max <<< "$counts"
-          sarif_total=$(jq '.runs[0].results | length' zizmor-results.sarif) || crash "unreadable SARIF output"
-          [ "$sarif_total" = "$total" ] || crash "SARIF has $sarif_total results, JSON has $total"
+          read -r total high medium low info max <<< "$counts"
+          sarif_total=$(jq -e '.runs[0].results | length' zizmor-results.sarif) || crash "unreadable SARIF output"
+          # Inputs zizmor could not parse or validate are skipped with a warning.
+          skipped=$(awk '/collect_inputs/ && /failed to (parse|validate) input/ { n++ } END { print n + 0 }' "$RUNNER_TEMP/zizmor.log") || crash "unreadable zizmor log"
+          [ "$sarif_total" -eq "$total" ] || crash "SARIF has $sarif_total results, JSON has $total"
           if [ "$total" -eq 0 ]; then expected=0; else expected=$((10 + max)); fi
           [ "$rc" -eq "$expected" ] || crash "exit code $rc does not match the findings (expected $expected)"
 
@@ -86,14 +90,17 @@ jobs:
           fi
           echo "sink=$sink" >> "$GITHUB_OUTPUT"
 
+          # Skipped inputs were not audited, so no threshold can pass with them.
           if [ "$FAIL_ON" = none ]; then
             verdict="report only"
           elif [ "$max" -ge "$floor" ]; then
             verdict="FAIL: findings at or above $FAIL_ON"
+          elif [ "$skipped" -gt 0 ]; then
+            verdict="FAIL: inputs skipped"
           else
             verdict="pass: no findings at or above $FAIL_ON"
           fi
-          line="zizmor: $total findings (high $high, medium $medium, low $low, informational $info, unknown $unknown)"
+          line="zizmor: $total findings (high $high, medium $medium, low $low, informational $info); $skipped inputs skipped (failed to parse or validate)"
           echo "$line"
           echo "exit code: $rc; fail_on_severity: $FAIL_ON; $verdict; SARIF: $sink"
           {
@@ -107,9 +114,14 @@ jobs:
             echo "- SARIF delivered to: $sink"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$FAIL_ON" != none ] && [ "$max" -ge "$floor" ]; then
-            echo "::error::zizmor found $FAIL_ON-or-higher findings (see the SARIF)"
-            exit 1
+          case "$verdict" in
+            FAIL*)
+              echo "::error::$line ($verdict)"
+              exit 1
+              ;;
+          esac
+          if [ "$total" -gt 0 ] || [ "$skipped" -gt 0 ]; then
+            echo "::warning::$line ($verdict)"
           fi
 
       - name: Upload SARIF to code scanning
@@ -127,3 +139,4 @@ jobs:
           path: zizmor-results.sarif
           retention-days: 3
           if-no-files-found: error
+          overwrite: true

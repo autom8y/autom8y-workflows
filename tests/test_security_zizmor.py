@@ -39,6 +39,12 @@ BY_SEVERITY = {
     "high": HEADER + "      - uses: some-org/some-action@main\n",
 }
 RANK = {"informational": 1, "low": 2, "medium": 3, "high": 4}
+# Inputs zizmor skips with a warning: bad YAML, and valid YAML that is not a workflow.
+BROKEN = {"syntax.yml": "name: x\non: [push\njobs: {{{\n", "schema.yml": "name: x\non: push\njobs: 5\n"}
+DEPENDABOT = (
+    "version: 2\nupdates:\n  - package-ecosystem: github-actions\n    directory: /\n"
+    "    schedule:\n      interval: weekly\n    cooldown:\n      default-days: 7\n"
+)
 # pull_request_target with a checkout of the pull request head.
 PR_TARGET = (
     "name: w\non:\n  pull_request_target:\npermissions: {}\njobs:\n  a:\n"
@@ -93,7 +99,8 @@ def zizmor() -> str:
 class Tree:
     """A fixture checkout plus the runner files the step writes to."""
 
-    def __init__(self, tmp: Path, zizmor: str, workflows: dict[str, str]) -> None:
+    def __init__(self, tmp: Path, zizmor: str, workflows: dict[str, str],
+                 extra: dict[str, str] | None = None) -> None:
         self.tmp = tmp
         self.root = tmp / "repo"
         self.bin = tmp / "bin"
@@ -103,6 +110,8 @@ class Tree:
         wf.mkdir(parents=True)
         for name, body in workflows.items():
             (wf / name).write_text(body)
+        for rel, body in (extra or {}).items():
+            (self.root / rel).write_text(body)
         self.summary = tmp / "summary.md"
         self.output = tmp / "output.txt"
 
@@ -180,9 +189,19 @@ def test_ci_installs_the_pinned_version() -> None:
     assert f"zizmor=={_pinned_version()}" in ci
 
 
+@pytest.mark.parametrize("name", ["Upload SARIF to code scanning", "Upload SARIF as an artifact"])
+def test_uploads_run_after_a_threshold_failure(name: str) -> None:
+    """A red threshold must still deliver the SARIF, so the upload may not need success()."""
+    cond = _step(name)["if"]
+    assert cond.startswith("${{ !cancelled() && steps.scan.outputs.sink == "), cond
+    assert "success()" not in cond and "failure()" not in cond
+
+
 def test_private_sarif_is_a_short_lived_artifact() -> None:
     step = _step("Upload SARIF as an artifact")
     assert 1 <= int(step["with"]["retention-days"]) <= 3
+    # A re-run after a red threshold uploads the same name again.
+    assert step["with"]["overwrite"] is True
     assert "sink == 'artifact'" in step["if"]
     assert "sink == 'code-scanning'" in _step("Upload SARIF to code scanning")["if"]
 
@@ -289,3 +308,86 @@ def test_crash_sets_no_sink(tmp_path: Path, zizmor: str) -> None:
     tree.wrap('exec "$REAL" --not-a-flag "$@"')
     tree.run()
     assert tree.sink() is None
+
+
+# ---------------------------------------------------------------------------
+# Unreadable output, skipped inputs, annotations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "message"),
+    [
+        # Nothing on stdout from either run, with a findings-class or reserved code.
+        ('case " $* " in *" json "*) exit 11 ;; esac\nexit 0', "unreadable JSON output"),
+        ('case " $* " in *" json "*) exit 10 ;; esac\nexit 0', "exit code 10"),
+        ("exit 0", "unreadable JSON output"),
+        # A real JSON run with an empty SARIF run.
+        ('case " $* " in *" sarif "*) exit 0 ;; esac\nexec "$REAL" "$@"', "unreadable SARIF output"),
+    ],
+)
+def test_empty_output_is_red(tmp_path: Path, zizmor: str, wrapper: str, message: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"w.yml": BY_SEVERITY["high"]})
+    tree.wrap(wrapper)
+    rc, out = tree.run(fail_on="high")
+    assert rc == 1, out
+    assert message in tree.summary_text()
+
+
+def test_sarif_count_mismatch_is_red(tmp_path: Path, zizmor: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"w.yml": BY_SEVERITY["high"]})
+    tree.wrap('case " $* " in *" sarif "*) echo \'{"runs":[{"results":[]}]}\'; exit 0 ;; esac\nexec "$REAL" "$@"')
+    rc, out = tree.run()
+    assert rc == 1, out
+    assert "SARIF has 0 results, JSON has 1" in tree.summary_text()
+
+
+def test_unknown_severity_is_red(tmp_path: Path, zizmor: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"w.yml": BY_SEVERITY["high"]})
+    tree.wrap(
+        'case " $* " in *" json "*) out=$("$REAL" "$@"); rc=$?; '
+        'printf "%s" "${out//\\"High\\"/\\"Critical\\"}"; exit $rc ;; esac\nexec "$REAL" "$@"'
+    )
+    rc, out = tree.run()
+    assert rc == 1, out
+    assert '"Critical"' in (tmp_path / "zizmor.json").read_text()
+    assert "unreadable JSON output" in tree.summary_text()
+
+
+def test_skipped_inputs_never_pass(tmp_path: Path, zizmor: str) -> None:
+    """Every workflow unparseable plus a valid dependabot.yml: zizmor exits 0 with no findings."""
+    tree = Tree(tmp_path, zizmor, dict(BROKEN), {".github/dependabot.yml": DEPENDABOT})
+    rc, out = tree.run(fail_on="informational")
+    assert rc == 1, out
+    summary = tree.summary_text()
+    assert _count(summary) == 0 and _exit_code(summary) == 0
+    assert "; 2 inputs skipped" in summary
+    assert "FAIL: inputs skipped" in summary
+    rc, out = tree.run()
+    assert rc == 0, out
+    assert "::warning::zizmor: 0 findings" in out and "2 inputs skipped" in out
+
+
+def test_skipped_inputs_are_counted_beside_findings(tmp_path: Path, zizmor: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"syntax.yml": BROKEN["syntax.yml"], "w.yml": BY_SEVERITY["high"]})
+    rc, out = tree.run()
+    assert rc == 0, out
+    summary = tree.summary_text()
+    assert _count(summary) == 1
+    assert "; 1 inputs skipped" in summary
+
+
+def test_report_only_count_is_annotated(tmp_path: Path, zizmor: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"w.yml": BY_SEVERITY["medium"]})
+    rc, out = tree.run()
+    assert rc == 0, out
+    assert "::warning::zizmor: 1 findings (high 0, medium 1" in out
+    assert "(report only)" in out
+
+
+def test_clean_tree_has_no_annotation(tmp_path: Path, zizmor: str) -> None:
+    tree = Tree(tmp_path, zizmor, {"ok.yml": CLEAN})
+    rc, out = tree.run()
+    assert rc == 0, out
+    assert "::warning::" not in out and "::error::" not in out
+    assert "; 0 inputs skipped" in tree.summary_text()
