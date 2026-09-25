@@ -2,6 +2,15 @@ name: "Security: zizmor Actions Audit"
 
 on:
   workflow_call:
+    inputs:
+      fail_on_severity:
+        description: >-
+          Fail the job when any finding is at or above this severity: none,
+          informational, low, medium or high. The default, none, reports the
+          findings without failing. A zizmor error always fails the job.
+        type: string
+        required: false
+        default: none
 
 jobs:
   zizmor:
@@ -19,13 +28,102 @@ jobs:
       - name: Install zizmor
         run: pip install zizmor==1.23.1
 
+      # zizmor exits 0 (no findings), 10-14 (findings; the highest severity
+      # sets the code) or anything else on an error. SARIF output always exits
+      # 0 on findings, so the JSON run carries the exit code and the counts.
       - name: Run zizmor
-        run: zizmor --format sarif . > zizmor-results.sarif || true
+        id: scan
+        env:
+          FAIL_ON: ${{ inputs.fail_on_severity }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          case "$FAIL_ON" in
+            none) floor=99 ;;
+            informational) floor=1 ;;
+            low) floor=2 ;;
+            medium) floor=3 ;;
+            high) floor=4 ;;
+            *) echo "::error::fail_on_severity must be none, informational, low, medium or high"; exit 1 ;;
+          esac
 
-      - name: Upload SARIF
+          rc=0
+          zizmor --format json . > "$RUNNER_TEMP/zizmor.json" || rc=$?
+          sarif_rc=0
+          zizmor --format sarif . > zizmor-results.sarif || sarif_rc=$?
+
+          crash() {
+            echo "::error::zizmor did not complete: $1"
+            printf '### zizmor\n\nzizmor did not complete: %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          case "$rc" in 0 | 1[0-4]) ;; *) crash "exit code $rc" ;; esac
+          [ "$sarif_rc" -eq 0 ] || crash "SARIF run exit code $sarif_rc"
+
+          # total high medium low informational unknown max-rank(0-4, -1 if none)
+          counts=$(jq -r '
+            [.[] | select(.ignored | not) | .determinations.severity] as $s
+            | def n($x): [$s[] | select(. == $x)] | length;
+            [($s | length), n("High"), n("Medium"), n("Low"), n("Informational"), n("Unknown"),
+             ([$s[] | {"Unknown":0,"Informational":1,"Low":2,"Medium":3,"High":4}[.]] | max // -1)]
+            | @tsv' "$RUNNER_TEMP/zizmor.json") || crash "unreadable JSON output"
+          read -r total high medium low info unknown max <<< "$counts"
+          sarif_total=$(jq '.runs[0].results | length' zizmor-results.sarif) || crash "unreadable SARIF output"
+          [ "$sarif_total" = "$total" ] || crash "SARIF has $sarif_total results, JSON has $total"
+          if [ "$total" -eq 0 ]; then expected=0; else expected=$((10 + max)); fi
+          [ "$rc" -eq "$expected" ] || crash "exit code $rc does not match the findings (expected $expected)"
+
+          # A fork pull request cannot write code scanning, and an artifact on
+          # a public repository would be public, so that case uploads nothing.
+          case "$VISIBILITY" in
+            private | internal) sink=artifact ;;
+            public) sink=code-scanning ;;
+            *) sink=none ;;
+          esac
+          if [ "$sink" = code-scanning ] && [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "$REPO" ]; then
+            sink=none
+          fi
+          echo "sink=$sink" >> "$GITHUB_OUTPUT"
+
+          if [ "$FAIL_ON" = none ]; then
+            verdict="report only"
+          elif [ "$max" -ge "$floor" ]; then
+            verdict="FAIL: findings at or above $FAIL_ON"
+          else
+            verdict="pass: no findings at or above $FAIL_ON"
+          fi
+          line="zizmor: $total findings (high $high, medium $medium, low $low, informational $info, unknown $unknown)"
+          echo "$line"
+          echo "exit code: $rc; fail_on_severity: $FAIL_ON; $verdict; SARIF: $sink"
+          {
+            echo "### zizmor"
+            echo
+            echo "$line"
+            echo
+            echo "- exit code: $rc"
+            echo "- fail_on_severity: $FAIL_ON"
+            echo "- result: $verdict"
+            echo "- SARIF delivered to: $sink"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL_ON" != none ] && [ "$max" -ge "$floor" ]; then
+            echo "::error::zizmor found $FAIL_ON-or-higher findings (see the SARIF)"
+            exit 1
+          fi
+
+      - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2 (node24)
-        if: always() && github.event.repository.visibility == 'public'
-        continue-on-error: true
+        if: ${{ !cancelled() && steps.scan.outputs.sink == 'code-scanning' }}
         with:
           sarif_file: zizmor-results.sarif
           category: zizmor
+
+      - name: Upload SARIF as an artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        if: ${{ !cancelled() && steps.scan.outputs.sink == 'artifact' }}
+        with:
+          name: zizmor-sarif
+          path: zizmor-results.sarif
+          retention-days: 3
+          if-no-files-found: error
