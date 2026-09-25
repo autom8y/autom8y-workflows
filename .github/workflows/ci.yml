@@ -73,3 +73,23 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==8.4.2 pyyaml==6.0.2
           "$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider tests/test_security_gitleaks.py
+
+  zizmor-workflow-tests:
+    name: zizmor workflow tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          persist-credentials: false
+
+      # The zizmor version must match security-zizmor.yml; the tests fail on a mismatch.
+      - name: Run tests
+        env:
+          ZIZMOR_TESTS_REQUIRED: "1"
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==8.4.2 pyyaml==6.0.2 zizmor==1.23.1
+          PATH="$RUNNER_TEMP/venv/bin:$PATH" "$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider tests/test_security_zizmor.py
