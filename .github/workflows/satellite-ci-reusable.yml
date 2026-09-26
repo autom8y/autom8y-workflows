@@ -2235,8 +2235,12 @@ jobs:
   #
   # Same policy as the build gate: trivy-action v0.35.0 (Trivy v0.69.3),
   # severity CRITICAL, exit-code 1, vuln-type os,library, format table, and the
-  # monorepo `.trivyignore` fetched from autom8y/autom8y. Exemptions therefore
+  # monorepo ignore file fetched from autom8y/autom8y. Exemptions therefore
   # go through one file for both gates.
+  #
+  # Ignore file: `.trivyignore.yaml` if the monorepo has it, else the plain
+  # `.trivyignore`. Exactly one is passed; trivy-action rejects a mix of YAML
+  # and plain files. The job fails if neither can be fetched.
   #
   # Scan target: this workflow builds no image, so the job scans a staging
   # directory that holds only the satellite's uv.lock and pyproject.toml
@@ -2281,30 +2285,61 @@ jobs:
         with:
           repository: autom8y/autom8y
           token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: '.trivyignore'
+          sparse-checkout: |
+            .trivyignore.yaml
+            .trivyignore
           sparse-checkout-cone-mode: false
           path: _monorepo_policy
           persist-credentials: false
 
+      # Prefer the YAML ignore file; fall back to the plain one only if the
+      # YAML is absent. Never select both.
+      - name: Select monorepo ignore file
+        id: policy
+        env:
+          POLICY_DIR: _monorepo_policy
+        run: |
+          set -euo pipefail
+          if [ -f "$POLICY_DIR/.trivyignore.yaml" ]; then
+            ignorefile=.trivyignore.yaml
+          elif [ -f "$POLICY_DIR/.trivyignore" ]; then
+            ignorefile=.trivyignore
+          else
+            echo "::error title=Trivy CRITICAL Gate::neither .trivyignore.yaml nor .trivyignore could be fetched from the monorepo; refusing to scan without the shared exemption policy."
+            exit 1
+          fi
+          echo "Selected monorepo ignore file: $ignorefile"
+          echo "ignorefile=$ignorefile" >> "$GITHUB_OUTPUT"
+
       - name: Stage lockfile scan target
+        env:
+          IGNOREFILE: ${{ steps.policy.outputs.ignorefile }}
         run: |
           set -euo pipefail
           if [ ! -f uv.lock ]; then
             echo "::error title=Trivy CRITICAL Gate::uv.lock not found at the repository root; the gate has nothing to scan."
             exit 1
           fi
-          if [ ! -f _monorepo_policy/.trivyignore ]; then
-            echo "::error title=Trivy CRITICAL Gate::monorepo .trivyignore could not be fetched; refusing to scan without the shared exemption policy."
-            exit 1
-          fi
+          case "$IGNOREFILE" in
+            .trivyignore.yaml|.trivyignore) ;;
+            *)
+              echo "::error title=Trivy CRITICAL Gate::unexpected ignore file selection '$IGNOREFILE'."
+              exit 1
+              ;;
+          esac
           rm -rf _trivy_scan
           mkdir _trivy_scan
           cp uv.lock _trivy_scan/uv.lock
           if [ -f pyproject.toml ]; then
             cp pyproject.toml _trivy_scan/pyproject.toml
           fi
-          cp _monorepo_policy/.trivyignore .trivyignore
-          echo "Applied .trivyignore ($(wc -l < .trivyignore) lines, $(grep -c '^CVE-' .trivyignore || true) exemptions)"
+          cp "_monorepo_policy/$IGNOREFILE" "$IGNOREFILE"
+          if [ "$IGNOREFILE" = .trivyignore.yaml ]; then
+            entries=$(grep -c '^[[:space:]]*- id:' "$IGNOREFILE" || true)
+          else
+            entries=$(grep -c '^CVE-' "$IGNOREFILE" || true)
+          fi
+          echo "Applied $IGNOREFILE ($(wc -l < "$IGNOREFILE") lines, $entries exemptions)"
           echo "Scan target: $(ls _trivy_scan | tr '\n' ' ')"
 
       - name: Gate on CRITICAL vulnerabilities (lockfile)
@@ -2316,5 +2351,5 @@ jobs:
           exit-code: '1'
           severity: 'CRITICAL'
           vuln-type: 'os,library'
-          trivyignores: '.trivyignore'
+          trivyignores: ${{ steps.policy.outputs.ignorefile }}
           version: 'v0.69.3'
