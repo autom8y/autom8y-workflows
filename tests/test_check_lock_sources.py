@@ -551,6 +551,13 @@ class RepoLocalExemption(_ScriptCase):
     def test_vendor_editable_without_manifest(self) -> None:
         self.assertExit(clean_packages() + [local_pkg("autom8y-vendored", "editable", "vendor/x")], 1)
 
+    def test_non_autom8y_editable_not_in_manifest_fails(self) -> None:
+        """Only a [manifest] member is exempt: the same in-repo editable fails when it is not one."""
+        pkg = local_pkg("dev-member", "editable", "packages/dev-member")
+        self.assertExit(clean_packages() + [pkg], 1, members=["autom8y-example"])
+        self.assertExit(clean_packages() + [pkg], 1)  # no [manifest] at all
+        self.assertExit(clean_packages() + [pkg], 0, members=["autom8y-example", "dev-member"])
+
     def test_non_autom8y_manifest_member_editable_passes(self) -> None:
         pkgs = clean_packages() + [local_pkg("autom8-dev-data", "editable", "packages/autom8-dev-data")]
         self.assertExit(pkgs, 0, members=["autom8y-example", "autom8-dev-data"])
@@ -1217,10 +1224,14 @@ PYPI_ROW_POLICY = {
     },
 }
 NEAR_MATCHES = {
-    # rule a: equal once -, _ and . are removed
+    # rule a: equal once -, _ and . are removed (these three are also one edit apart)
     "autom8y/autom8y_sms": "autom8y/autom8y-sms",
     "autom8y/autom8y.sms": "autom8y/autom8y-sms",
     "autom8y/autom8ysms": "autom8y/autom8y-sms",
+    # rule a only: two or more edits apart, so no other rule catches them
+    "autom8y/autom8y_s.ms": "autom8y/autom8y-sms",
+    "autom8y/au.tom8y-s_ms": "autom8y/autom8y-sms",
+    "autom8y/autom8y-s-m-s": "autom8y/autom8y-sms",
     # rule b: same owner, names one edit apart
     "autom8y/autom8y-sma": "autom8y/autom8y-sms",
     "autom8y/autom8y-sm": "autom8y/autom8y-sms",
