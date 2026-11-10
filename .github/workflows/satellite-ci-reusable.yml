@@ -343,7 +343,8 @@ jobs:
             .github/scripts/check_lock_sources.py
             .github/lock-sources/policy.json
           sparse-checkout-cone-mode: false
-          # Full history, so the runner can verify the canonical SHA against main.
+          # Full history: the runner (--require-canonical-on-main) verifies the canonical
+          # SHA against main in every target except autom8y-workflows itself.
           fetch-depth: 0
           persist-credentials: false
 

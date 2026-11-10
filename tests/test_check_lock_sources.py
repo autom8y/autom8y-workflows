@@ -1644,6 +1644,9 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(_field(canonical, "repository"), "autom8y/autom8y-workflows")
                 self.assertEqual(sorted(_sparse_paths(canonical)), sorted(_SPARSE))
                 self.assertEqual(_field(canonical, "fetch-depth"), "0")  # F-1: history to verify main
+                # G-6: the comment says what the history is for, and where it applies.
+                self.assertIn("          # Full history: the runner (--require-canonical-on-main) verifies the canonical", canonical)
+                self.assertIn("          # SHA against main in every target except autom8y-workflows itself.", canonical)
                 for rel in _SPARSE:
                     self.assertTrue((REPO_ROOT / rel).is_file(), msg=rel)
                 for s in steps:
