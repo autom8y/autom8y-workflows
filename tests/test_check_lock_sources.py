@@ -1209,6 +1209,89 @@ class RunnerCanonicalOnMain(_RunnerCase):
         self.assertNotIn("::group::", out)
 
 
+PYPI_ROW_POLICY = {
+    **TEST_POLICY,
+    "repositories": {
+        **TEST_POLICY["repositories"],
+        "autom8y/needs-pypi": {"registry_hosts": ["pypi.org", "files.pythonhosted.org"], "direct_hosts": []},
+    },
+}
+NEAR_MATCHES = {
+    # rule a: equal once -, _ and . are removed
+    "autom8y/autom8y_sms": "autom8y/autom8y-sms",
+    "autom8y/autom8y.sms": "autom8y/autom8y-sms",
+    "autom8y/autom8ysms": "autom8y/autom8y-sms",
+    # rule b: same owner, names one edit apart
+    "autom8y/autom8y-sma": "autom8y/autom8y-sms",
+    "autom8y/autom8y-sm": "autom8y/autom8y-sms",
+    "autom8y/autom8y-smss": "autom8y/autom8y-sms",
+    "autom8y/autom8y-adx": "autom8y/autom8y-ads",
+    # rule c: same owner, the listed name plus a separator-led suffix
+    "autom8y/autom8y-sms-v2": "autom8y/autom8y-sms",
+    "autom8y/autom8y-data_service": "autom8y/autom8y-data",
+    "autom8y/autom8y-asana.next": "autom8y/autom8y-asana",
+    # rule d: same name, another owner (a transfer), in any case
+    "someone/autom8y-sms": "autom8y/autom8y-sms",
+    "Someone/AUTOM8Y-SCHEDULING": "autom8y/autom8y-scheduling",
+}
+NOT_NEAR = ("autom8y/not-listed", "autom8y/autom8y", "autom8y/autom8y-dev-x", "autom8y/autom8y-api-schemas", "autom8y/autom8y-crm", "someone/autom8y-sms2")
+
+
+class RunnerRepoMatching(_RunnerCase):
+    """F-3: casefolded keys, and a refused near-match, so a renamed satellite cannot turn unlisted."""
+
+    def test_casefold_equal_name_is_the_listed_repository(self) -> None:
+        for repo in ("Autom8y/Autom8y-SMS", "AUTOM8Y/AUTOM8Y-SMS", "autom8y/AUTOM8Y-sms"):
+            with self.subTest(repo=repo):
+                out = self.assertRunner({}, 2, repo=repo)  # listed: a missing lock is refused
+                self.assertIn("uv.lock missing for a listed repository; refusing", out)
+                out = self.assertRunner(_both(render_lock(clean_packages())), 0, repo=repo)
+                self.assertIn("repository autom8y/autom8y-sms;", out)  # the checker got the policy key
+
+    def test_casefold_match_uses_that_row(self) -> None:
+        pypi = _both(render_lock(clean_packages() + [pypi_pkg("certifi", "2025.1.1")]))
+        self.assertRunner(pypi, 0, repo="Autom8y/Needs-PyPI", policy=PYPI_ROW_POLICY)
+        self.assertRunner(pypi, 0, repo="autom8y/needs-pypi", policy=PYPI_ROW_POLICY)
+        self.assertRunner(pypi, 1, repo="autom8y/autom8y-sms", policy=PYPI_ROW_POLICY)
+
+    def test_near_match_is_refused_with_exit_2(self) -> None:
+        for repo, key in NEAR_MATCHES.items():
+            for locks in ({}, _both(render_lock(clean_packages()))):
+                with self.subTest(repo=repo, has_lock=bool(locks)):
+                    out = self.assertRunner(locks, 2, repo=repo)
+                    self.assertIn(f"repository {repo!r} nearly matches the listed {key!r} but is not it; refusing", out)
+                    self.assertNotIn("::group::", out)
+
+    def test_names_that_are_not_near_stay_unlisted(self) -> None:
+        for repo in NOT_NEAR:
+            with self.subTest(repo=repo):
+                out = self.assertRunner({}, 0, repo=repo)
+                self.assertIn("::notice::no uv.lock", out)
+                self.assertRunner(_both(render_lock(clean_packages())), 0, repo=repo)
+
+    def test_unit_rule_by_rule(self) -> None:
+        keys = TEST_POLICY["repositories"]
+        for repo, key in NEAR_MATCHES.items():
+            with self.subTest(repo=repo):
+                self.assertEqual(runner_mod.resolve_repo(repo, keys), (None, key))
+        for repo in NOT_NEAR:
+            with self.subTest(repo=repo):
+                self.assertEqual(runner_mod.resolve_repo(repo, keys), (None, None))
+        self.assertEqual(runner_mod.resolve_repo("autom8y/autom8y-sms", keys), ("autom8y/autom8y-sms", None))
+        self.assertEqual(runner_mod.resolve_repo("Autom8y/Autom8y-Sms", keys), ("autom8y/autom8y-sms", None))
+
+    def test_missing_or_malformed_repo_is_refused_even_without_a_lock(self) -> None:
+        for repo in (None, "", "autom8y-sms", "a/b/c", "autom8y/autom8y-sms\nx"):
+            with self.subTest(repo=repr(repo)):
+                out = self.assertRunner({}, 2, repo=repo)
+                self.assertIn("the repository name (LOCK_SOURCES_REPO) is missing or not owner/name; refusing", out)
+
+    def test_policy_keys_that_differ_only_in_case_are_refused(self) -> None:
+        policy = {**TEST_POLICY, "repositories": {**TEST_POLICY["repositories"], "Autom8y/Autom8y-SMS": {}}}
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, policy=policy)
+        self.assertIn("two keys that differ only in case", out)
+
+
 # --- Wiring twin: the reusable job and the standalone wrapper ------------------------------
 
 _JOB = "lock-sources"

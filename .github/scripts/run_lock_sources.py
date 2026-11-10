@@ -37,7 +37,29 @@ Exit code: the worst (highest) exit over all trees, or:
 * 2 with "uv.lock missing for a listed repository; refusing" when the repository is a key
   in the policy's table and no tree has a uv.lock;
 * 0 with a notice when the repository is not in the table and no tree has a uv.lock;
-* 1 for a tree whose uv.lock is missing while another tree has one.
+* 1 for a tree whose uv.lock is missing while another tree has one;
+* 2 for a missing or malformed repository name, and 2 for a NEAR-MATCH (below).
+
+Repository matching (F-3). A renamed listed satellite must not silently become unlisted,
+because an unlisted repository with no uv.lock exits 0. So the repository is matched to
+the policy table in three steps:
+
+1. Exact key, or a key that is equal under ``str.casefold()`` (GitHub names are
+   case-insensitive): the repository is LISTED under that key, and the checker is given
+   the key as it is written in policy.json.
+2. Otherwise, a NEAR-MATCH of any listed key is refused with exit 2. Names are compared
+   casefolded. A repository nearly matches a key when any of these holds:
+   a. they are equal once ``-``, ``_`` and ``.`` are removed from both
+      (``autom8y/autom8y_sms``, ``autom8y/autom8ysms``);
+   b. the owner is the same and the names are one edit apart (Levenshtein distance 1:
+      ``autom8y/autom8y-sma``, ``autom8y/autom8y-sm``, ``autom8y/autom8y-smss``);
+   c. the owner is the same and the repository's name is the listed name plus a suffix
+      that starts with ``-``, ``_`` or ``.`` (``autom8y/autom8y-sms-v2``). Only this
+      direction counts, so a shorter, more general name (``autom8y/autom8y``) is not a
+      near-match of ``autom8y/autom8y-sms``;
+   d. the name is the same and the owner differs (a transfer: ``someone/autom8y-sms``).
+3. Otherwise the repository is UNLISTED: CodeArtifact only, and a missing uv.lock gives a
+   notice and exit 0.
 
 Python 3.11+ standard library only. No network. Output never prints the account.
 """
@@ -97,7 +119,52 @@ def load_policy(path: Path) -> tuple[str, dict]:
     for key in repositories:
         if not _REPO_KEY_RE.fullmatch(key):
             raise PolicyError(f"the policy file's repositories key {key!r} is not owner/name")
+    if len({key.casefold() for key in repositories}) != len(repositories):
+        raise PolicyError("the policy file's repositories has two keys that differ only in case")
     return data["account_sha256"], repositories
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Levenshtein distance exactly 1."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _strip_separators(text: str) -> str:
+    return re.sub(r"[-_.]", "", text)
+
+
+def _near(repo: str, key: str) -> bool:
+    """The near-match rule (2a-2d in the module docstring), on casefolded names."""
+    owner, _, name = repo.casefold().partition("/")
+    key_owner, _, key_name = key.casefold().partition("/")
+    if _strip_separators(owner + "/" + name) == _strip_separators(key_owner + "/" + key_name):
+        return True
+    if owner == key_owner:
+        if _one_edit_apart(name, key_name):
+            return True
+        if any(name.startswith(key_name + sep) for sep in "-_."):
+            return True
+    elif name == key_name:
+        return True
+    return False
+
+
+def resolve_repo(repo: str, repositories: dict) -> tuple[str | None, str | None]:
+    """Return ``(listed_key, near_key)``: the policy key this repository is, or the key it nearly is."""
+    if repo in repositories:
+        return repo, None
+    folded = {key.casefold(): key for key in repositories}
+    if repo.casefold() in folded:
+        return folded[repo.casefold()], None
+    for key in sorted(repositories):
+        if _near(repo, key):
+            return None, key
+    return None, None
 
 
 def parse_tree(value: str) -> tuple[str, Path]:
@@ -155,8 +222,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo = os.environ.get(REPO_ENV, "")
     account = os.environ.get(ACCOUNT_ENV, "")
 
+    if not _REPO_KEY_RE.fullmatch(repo):
+        say("::error::the repository name (LOCK_SOURCES_REPO) is missing or not owner/name; refusing")
+        return EXIT_USAGE
+    listed_key, near_key = resolve_repo(repo, repositories)
+    if near_key is not None:
+        say(
+            f"::error::repository {repo!r} nearly matches the listed {near_key!r} but is not it; refusing"
+            " (a renamed or transferred satellite must be renamed in policy.json too)"
+        )
+        return EXIT_USAGE
+    checker_repo = listed_key if listed_key is not None else repo
+
     if not any((tree / "uv.lock").is_file() for _, tree in args.tree):
-        if repo in repositories:
+        if listed_key is not None:
             say(f"::error::{LISTED_MISSING_MESSAGE}")
             return EXIT_USAGE
         say("::notice::no uv.lock in the caller repository; the lock-source check does not apply")
@@ -172,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         say(f"::group::uv.lock at {label}")
         command = [
             sys.executable, "-I", str(script), str(lock),
-            "--repo", repo,
+            "--repo", checker_repo,
             "--account", account,
             "--account-sha256", account_sha256,
             "--allowlist-json", json.dumps(repositories),
