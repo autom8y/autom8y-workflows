@@ -1188,6 +1188,34 @@ class Runner(_RunnerCase):
         self.assertRunner(_both(render_lock(clean_packages())), 0)  # the step-env name is read
 
 
+class RunnerOnMainHomeExemption(_RunnerCase):
+    """G-1: the on-main check exempts autom8y/autom8y-workflows only, decided by LOCK_SOURCES_REPO."""
+
+    EXEMPT = "the canonical on-main check does not apply in autom8y/autom8y-workflows itself"
+    REFUSED = "the canonical autom8y-workflows SHA is not reachable from autom8y-workflows main; refusing"
+
+    def test_home_repository_off_main_is_exempt(self) -> None:
+        for repo in (HOME_REPO, "Autom8y/Autom8y-Workflows"):
+            with self.subTest(repo=repo):
+                out = self.assertRunner(_both(render_lock(clean_packages())), 0, repo=repo, canonical_git="off-main", extra_args=[ON_MAIN_FLAG])
+                self.assertIn(f"::notice::{self.EXEMPT}", out)
+
+    def test_every_other_repository_off_main_is_refused(self) -> None:
+        for repo in ("autom8y/autom8y-sms", "autom8y/not-listed", "autom8y/autom8y-workflows-x", "someone/autom8y-workflows", "autom8y/autom8y-workflow"):
+            with self.subTest(repo=repo):
+                out = self.assertRunner(_both(render_lock(clean_packages())), 2, repo=repo, canonical_git="off-main", extra_args=[ON_MAIN_FLAG])
+                self.assertIn(f"::error::{self.REFUSED}", out)
+                self.assertNotIn(self.EXEMPT, out)
+
+    def test_the_exemption_needs_the_repository_env_not_an_argument(self) -> None:
+        # No LOCK_SOURCES_REPO: not exempt, so the off-main canonical is refused.
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, repo=None, canonical_git="off-main", extra_args=[ON_MAIN_FLAG])
+        self.assertIn(f"::error::{self.REFUSED}", out)
+
+    def test_home_repository_on_main_is_not_refused_either(self) -> None:
+        self.assertRunner(_both(render_lock(clean_packages())), 0, repo=HOME_REPO, canonical_git="main", extra_args=[ON_MAIN_FLAG])
+
+
 class RunnerCanonicalOnMain(_RunnerCase):
     """F-1: --require-canonical-on-main refuses a canonical SHA not reachable from main."""
 
@@ -1312,10 +1340,11 @@ _RUN_COMMAND = (
     "python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical"
     " --tree github.sha=caller-sha --tree PR-head=caller-pr-head"
 )
-# F-1: only the reusable job (caller-supplied canonical ref) requires the canonical SHA on main.
+# F-1 and G-1: BOTH entry points require the canonical SHA on main; the runner exempts only
+# autom8y/autom8y-workflows itself, decided by github.repository.
 _RUN_COMMAND_FOR = {
     "satellite-ci-reusable.yml": _RUN_COMMAND + " " + ON_MAIN_FLAG,
-    "lock-sources-required.yml": _RUN_COMMAND,
+    "lock-sources-required.yml": _RUN_COMMAND + " " + ON_MAIN_FLAG,
 }
 _SPARSE = (".github/scripts/run_lock_sources.py", ".github/scripts/check_lock_sources.py", ".github/lock-sources/policy.json")
 _CANONICAL_REF = {
@@ -1577,20 +1606,17 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertNotIn("toJSON", wf.read_text(encoding="utf-8"))
 
     def test_wrapper_and_reusable_job_are_identical_except_the_canonical_ref(self) -> None:
-        """Identical except (1) the canonical ref and (2) F-1: the reusable run line's flag."""
-        reusable_run = f"        run: {_RUN_COMMAND_FOR[WORKFLOW.name]}"
-        wrapper_run = f"        run: {_RUN_COMMAND_FOR[WRAPPER.name]}"
-        self.assertEqual(self.job(WORKFLOW).count(reusable_run), 1)
-        self.assertEqual(self.job(WRAPPER).count(wrapper_run), 1)
+        """G-1: identical except the canonical ref; both run lines carry the on-main flag."""
+        for wf in self.WORKFLOWS:
+            with self.subTest(workflow=wf.name):
+                self.assertEqual(self.job(wf).count(f"        run: {_RUN_COMMAND} {ON_MAIN_FLAG}"), 1)
 
         def normalized(wf: Path) -> list[str]:
             lines = [l.replace(_CANONICAL_REF[wf.name], "<canonical-ref>") for l in self.job(wf)]
-            lines = [wrapper_run if l == reusable_run else l for l in lines]  # the one allowed difference
             while lines and not lines[-1].strip():
                 lines.pop()
             return lines
         self.assertEqual(normalized(WORKFLOW), normalized(WRAPPER))
-        self.assertNotIn(ON_MAIN_FLAG, WRAPPER.read_text(encoding="utf-8").split("jobs:", 1)[1])
 
     def test_workflows_sha_input_says_literal_sha(self) -> None:
         desc = _field(_input_block("autom8y_workflows_sha"), "description")
@@ -1680,14 +1706,19 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(self._job_run(wf, _both(clean), account="")["rc"], 2)
                 self.assertEqual(self._job_run(wf, _both(clean), account=OTHER_ACCOUNT)["rc"], 3)
 
-    def test_canonical_off_main_refused_only_in_the_reusable_job(self) -> None:
-        """F-1, both sides: the reusable job refuses an off-main canonical SHA; the wrapper does not."""
+    def test_canonical_off_main_refused_except_in_the_home_repository(self) -> None:
+        """G-1, both sides, in BOTH entry points: off-main is refused for a satellite and
+        allowed only for autom8y/autom8y-workflows itself (its own PRs, like #41)."""
         clean = _both(render_lock(clean_packages()))
-        reusable = self._job_run(WORKFLOW, clean, canonical_on_main=False)
-        self.assertEqual(reusable["rc"], 2, msg=reusable)
-        self.assertIn("not reachable from autom8y-workflows main", str(reusable["out"]))
-        self.assertEqual(self._job_run(WRAPPER, clean, canonical_on_main=False)["rc"], 0)
-        self.assertEqual(self._job_run(WORKFLOW, clean, canonical_on_main=True)["rc"], 0)
+        for wf in self.WORKFLOWS:
+            with self.subTest(workflow=wf.name):
+                satellite = self._job_run(wf, clean, canonical_on_main=False)
+                self.assertEqual(satellite["rc"], 2, msg=satellite)
+                self.assertIn("not reachable from autom8y-workflows main", str(satellite["out"]))
+                home = self._job_run(wf, clean, repo=HOME_REPO, canonical_on_main=False)
+                self.assertEqual(home["rc"], 0, msg=home)
+                self.assertIn("the canonical on-main check does not apply in autom8y/autom8y-workflows itself", str(home["out"]))
+                self.assertEqual(self._job_run(wf, clean, canonical_on_main=True)["rc"], 0)
 
     def test_real_policy_refuses_the_synthetic_account_with_exit_3(self) -> None:
         for wf in self.WORKFLOWS:

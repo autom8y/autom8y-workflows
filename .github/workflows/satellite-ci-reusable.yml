@@ -304,11 +304,11 @@ jobs:
   # A satellite PR can change inputs.autom8y_workflows_sha in its own Test workflow, so
   # this job is a fast signal inside the satellite's CI, not the merge gate. The gate is
   # the H-41 wrapper, lock-sources-required.yml, whose ref the org ruleset pins. As a
-  # partial guard, this job alone passes --require-canonical-on-main: the runner refuses
+  # partial guard, this job passes --require-canonical-on-main: the runner refuses
   # (exit 2) unless that SHA is reachable from autom8y-workflows main, which rules out
-  # an off-main or fork-network commit carrying a permissive policy. The wrapper does
-  # not pass the flag, because on a pull request in autom8y-workflows itself its own
-  # commit is not on main yet.
+  # an off-main or fork-network commit carrying a permissive policy. The wrapper passes
+  # the same flag; the runner exempts only autom8y/autom8y-workflows itself, decided by
+  # github.repository.
   lock-sources:
     name: Lock sources (uv.lock, every package)
     runs-on: ubuntu-latest

@@ -15,14 +15,18 @@
 #
 # The job runs the same steps as the lock-sources job of satellite-ci-reusable.yml, and
 # both run the same runner, script and policy, fetched from autom8y-workflows through the
-# same sparse checkout. There are two differences. The canonical ref: here it is
+# same sparse checkout. The one difference is the canonical ref: here it is
 # github.workflow_sha, which in a required-workflow run should be the commit of this file
 # in autom8y-workflows (the ruleset's pinned SHA). [UV-P: github.workflow_sha resolves to
 # the wrapper's own commit in a required-workflow run | METHOD: docs-cite, or one run that
-# echoes it beside github.workflow_ref | REASON: not local] And the reusable job alone
-# passes --require-canonical-on-main, because its ref is caller-supplied; this wrapper
-# must not, because on a pull request in autom8y-workflows itself (this file's own repo)
-# github.workflow_sha is the PR's commit, which is not on main yet.
+# echoes it beside github.workflow_ref | REASON: not local]
+# Both pass --require-canonical-on-main, so the runner refuses (exit 2) a canonical SHA not
+# reachable from autom8y-workflows main: here that catches a ruleset pinned off main, or a
+# workflow_sha that resolves to another, unmerged commit. The runner exempts exactly one
+# target, decided by github.repository (never a caller input): autom8y/autom8y-workflows
+# itself, because on a pull request in this file's own repo github.workflow_sha is the
+# PR's commit, which is not on main yet. [UV-P: on a PR in autom8y-workflows,
+# github.workflow_sha is the PR's commit | METHOD: the planned probe run | REASON: not local]
 #
 # The job runs no caller code: no uv, no project install, nothing from the satellite's
 # tree except its uv.lock.
@@ -87,4 +91,4 @@ jobs:
           # what binds the account (a mismatch exits 3).
           LOCK_SOURCES_REPO: ${{ github.repository }}
           LOCK_SOURCES_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
-        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head
+        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head --require-canonical-on-main

@@ -14,12 +14,16 @@ Usage (from the job's workspace):
   from it, never from the caller's tree.
 * ``--tree``: a checkout of the caller to check, for example ``github.sha=caller-sha`` and
   ``PR-head=caller-pr-head``. Every tree is checked and every one must pass.
-* ``--require-canonical-on-main`` (the reusable job only): refuse, with exit 2, unless the
-  canonical checkout's HEAD is reachable from ``refs/remotes/origin/main``. The reusable
+* ``--require-canonical-on-main`` (both entry points pass it): refuse, with exit 2, unless
+  the canonical checkout's HEAD is reachable from ``refs/remotes/origin/main``. The reusable
   job's canonical ref is caller-supplied (``inputs.autom8y_workflows_sha``), so this stops a
   caller from pointing it at an off-main or fork-network commit with a permissive policy.
-  The H-41 wrapper does not pass it: its ref is the ruleset's pinned commit, and on a pull
-  request in autom8y-workflows itself that commit is not on main yet.
+  In the H-41 wrapper the ref is the ruleset's pinned commit, and the check catches a pin,
+  or a ``github.workflow_sha``, that is not on main.
+  ONE EXEMPTION, decided only by ``LOCK_SOURCES_REPO`` (``github.repository``, never a
+  caller input): when the repository is autom8y/autom8y-workflows itself (compared
+  casefolded), the check is skipped with a notice, because on a pull request in that
+  repository ``github.workflow_sha`` is the PR's own commit, which is not on main yet.
 
 The repository key and the account come from the step's own ``env:`` block, which the
 calling workflow file sets (a caller cannot set env on a ``uses:`` job):
@@ -79,6 +83,9 @@ REPO_ENV = "LOCK_SOURCES_REPO"
 ACCOUNT_ENV = "LOCK_SOURCES_ACCOUNT"
 SCRIPT_REL = Path(".github/scripts/check_lock_sources.py")
 POLICY_REL = Path(".github/lock-sources/policy.json")
+# The one repository exempt from --require-canonical-on-main: its own pull requests run
+# the wrapper at the PR's commit, which is not on main yet.
+HOME_REPO = "autom8y/autom8y-workflows"
 
 EXIT_OK = 0
 EXIT_VIOLATION = 1
@@ -197,7 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--require-canonical-on-main",
         action="store_true",
-        help="refuse unless the canonical HEAD is reachable from origin/main (the reusable job only)",
+        help="refuse unless the canonical HEAD is reachable from origin/main (except in autom8y/autom8y-workflows itself)",
     )
     args = parser.parse_args(argv)
 
@@ -209,10 +216,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_USAGE
     if args.require_canonical_on_main:
-        problem = canonical_on_main_problem(args.canonical)
-        if problem is not None:
-            say(f"::error::{problem}; refusing")
-            return EXIT_USAGE
+        if os.environ.get(REPO_ENV, "").casefold() == HOME_REPO.casefold():
+            say(
+                f"::notice::the canonical on-main check does not apply in {HOME_REPO} itself"
+                " (its own pull requests run at the PR's commit, which is not on main yet)"
+            )
+        else:
+            problem = canonical_on_main_problem(args.canonical)
+            if problem is not None:
+                say(f"::error::{problem}; refusing")
+                return EXIT_USAGE
     try:
         account_sha256, repositories = load_policy(args.canonical / POLICY_REL)
     except PolicyError as exc:
