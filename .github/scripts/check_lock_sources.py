@@ -53,6 +53,7 @@ A query string or fragment fails, except on a git source (where uv records ``?re
 ``#commit``).
 
 Exit codes: 0 ok; 1 at least one violation; 2 vacuous (no autom8y-* registry package was
+checked; for a repository whose row names registry hosts, no registry package at all was
 checked) or a usage error (missing or malformed account, repository or pinned hash, bad
 allowlist, unreadable or malformed lock, Python < 3.11); 3 the account does not match the
 pinned account hash. Every line of output masks any run of 12 or more digits as ``<acct>``.
@@ -360,6 +361,17 @@ def check_lock(lock: dict, policy: Policy) -> tuple[list[str], int]:
     return violations, counted
 
 
+def registry_package_count(lock: dict) -> int:
+    """How many ``[[package]]`` entries (any name) have a registry source."""
+    packages = lock.get("package", [])
+    if not isinstance(packages, list):
+        return 0
+    return sum(
+        1 for p in packages
+        if isinstance(p, dict) and isinstance(p.get("source"), dict) and "registry" in p["source"]
+    )
+
+
 class _MaskingParser(argparse.ArgumentParser):
     """argparse echoes bad arguments on error; mask them like every other line."""
 
@@ -427,6 +439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
 
     violations, counted = check_lock(lock, policy)
+    registry_total = registry_package_count(lock)
     allowed = sorted(policy.registry_hosts | policy.direct_hosts)
     scope = f"repository {repo or '(none)'}; non-CodeArtifact hosts allowed: {', '.join(allowed) or 'none'}"
     for violation in violations:
@@ -434,10 +447,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if violations:
         emit(f"FAIL: {counted} {NAME_PREFIX}* registry package(s) checked, {len(violations)} violation(s) ({scope})")
         return EXIT_VIOLATION
-    if counted == 0:
+    if counted == 0 and not (policy.registry_hosts and registry_total > 0):
+        # A repository whose policy row names registry hosts (only autom8y-workflows itself,
+        # whose lock is dev-only test tooling) may have no autom8y-* package, but it still
+        # must have at least one registry package checked. Every other repository keeps
+        # the anchor rule: no autom8y-* registry package is vacuous.
         emit(f"VACUOUS: no {NAME_PREFIX}* registry packages in {args.lock} ({scope})", stream=sys.stderr)
         return EXIT_USAGE
-    emit(f"OK: {counted} {NAME_PREFIX}* registry package(s) and every other package checked, 0 violations ({scope})")
+    emit(
+        f"OK: {counted} {NAME_PREFIX}* registry package(s) and every other package checked"
+        f" ({registry_total} registry package(s) in all), 0 violations ({scope})"
+    )
     return EXIT_OK
 
 

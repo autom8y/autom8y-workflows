@@ -811,6 +811,11 @@ POLICY = REPO_ROOT / ".github" / "lock-sources" / "policy.json"
 RUNNER = REPO_ROOT / ".github" / "scripts" / "run_lock_sources.py"
 WRAPPER = REPO_ROOT / ".github" / "workflows" / "lock-sources-required.yml"
 SATELLITES = ("autom8y/autom8y-ads", "autom8y/autom8y-asana", "autom8y/autom8y-data", "autom8y/autom8y-scheduling", "autom8y/autom8y-sms")
+# This repository: its own uv.lock is dev-only test tooling on PyPI, so its row names the two
+# PyPI hosts. It is the one row that does.
+HOME_REPO = "autom8y/autom8y-workflows"
+HOME_ROW = {"registry_hosts": ["pypi.org", "files.pythonhosted.org"], "direct_hosts": []}
+HOME_LOCK = REPO_ROOT / "uv.lock"
 OWNER_NOTE = "owner: autom8y-workflows maintainers, changed only in a reviewed PR when the account changes"
 _REPO_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.ASCII)
 
@@ -839,9 +844,13 @@ class PolicyFile(unittest.TestCase):
 
     def test_satellites_are_listed_with_no_extra_hosts(self) -> None:
         repositories = _real_policy()["repositories"]
-        self.assertEqual(sorted(repositories), sorted(SATELLITES))
+        self.assertEqual(sorted(repositories), sorted(SATELLITES + (HOME_REPO,)))
         for repo in SATELLITES:
             self.assertEqual(repositories[repo], {"registry_hosts": [], "direct_hosts": []})
+
+    def test_home_repo_row_is_exactly_the_two_pypi_hosts(self) -> None:
+        self.assertEqual(_real_policy()["repositories"][HOME_REPO], HOME_ROW)
+        self.assertIn("autom8y/autom8y-workflows is the one row that names PyPI hosts", _real_policy()["_owner"])
 
     def test_owner_note_and_hash_shape(self) -> None:
         policy = _real_policy()
@@ -866,6 +875,59 @@ class PolicyFile(unittest.TestCase):
                 self.assertNotIn(_real_policy()["account_sha256"], text)
                 self.assertNotIn("registry_hosts", text)
                 self.assertNotIn("toJSON", text)
+
+
+def _append_packages(lock_text: str, packages: list[dict]) -> str:
+    """The given lock text with extra [[package]] tables appended (render_lock's header dropped)."""
+    return lock_text.rstrip("\n") + "\n\n" + render_lock(packages).split("\n", 4)[4]
+
+
+class HomeRepoRow(_ScriptCase):
+    """The autom8y-workflows row, two-sided, against the REAL policy.json and this repo's real uv.lock."""
+
+    def check(self, lock_text: str, repo: str = HOME_REPO) -> subprocess.CompletedProcess[str]:
+        return self.run_check(lock_text, repo=repo, allowlist=json.dumps(_real_policy()["repositories"]))
+
+    def assertCheck(self, lock_text: str, code: int, repo: str = HOME_REPO) -> subprocess.CompletedProcess[str]:
+        result = self.check(lock_text, repo)
+        self.assertEqual(result.returncode, code, msg=result.stdout + result.stderr)
+        return result
+
+    def test_the_real_home_lock_passes_under_the_row(self) -> None:
+        result = self.assertCheck(HOME_LOCK.read_text(encoding="utf-8"), 0)
+        self.assertIn("non-CodeArtifact hosts allowed: files.pythonhosted.org, pypi.org", result.stdout)
+
+    def test_the_real_home_lock_fails_without_the_row(self) -> None:
+        for repo in ("autom8y/not-listed", SATELLITES[0]):
+            with self.subTest(repo=repo):
+                self.assertCheck(HOME_LOCK.read_text(encoding="utf-8"), 1, repo=repo)
+
+    def test_an_autom8y_package_on_pypi_still_fails_under_the_row(self) -> None:
+        lock = _append_packages(HOME_LOCK.read_text(encoding="utf-8"), [pypi_pkg("autom8y-auth", "4.3.0")])
+        result = self.assertCheck(lock, 1)
+        self.assertIn("autom8y-auth: registry 'https://pypi.org/simple/'", result.stdout)
+        self.assertIn("is not an expected host", result.stdout)
+
+    def test_a_third_host_still_fails_under_the_row(self) -> None:
+        for index, files in (
+            ("https://evil.example/simple/", "https://evil.example/"),
+            (PYPI, "https://evil.example/"),  # wheel only on a third host
+            ("https://pypi.org.evil.example/simple/", FILES),
+        ):
+            with self.subTest(index=index, files=files):
+                pkg = registry_pkg("certifi", "2025.1.1", index=index, sdist_base=files, wheel_base=files)
+                self.assertCheck(_append_packages(HOME_LOCK.read_text(encoding="utf-8"), [pkg]), 1)
+
+    def test_a_git_source_still_fails_under_the_row(self) -> None:
+        pkg = git_pkg("somelib", "https://github.com/example/somelib?rev=main#abcdef0")
+        self.assertCheck(_append_packages(HOME_LOCK.read_text(encoding="utf-8"), [pkg]), 1)
+
+    def test_vacuity_under_the_row_needs_one_registry_package(self) -> None:
+        root_only = render_lock([local_pkg("autom8y-workflows-tests", "virtual", ".")])
+        result = self.assertCheck(root_only, 2)
+        self.assertIn("VACUOUS", result.stderr)
+        # Satellites keep the anchor rule: a lock with registry packages but no autom8y-* is vacuous.
+        self.assertCheck(render_lock([local_pkg("autom8y-example", "editable", "."), registry_pkg("httpx")]), 2, repo=SATELLITES[0])
 
 
 # --- Runner ------------------------------------------------------------------------------
