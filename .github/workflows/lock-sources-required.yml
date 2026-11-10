@@ -1,0 +1,95 @@
+# ==============================================================================
+# Lock sources (required workflow, H-41)
+# ==============================================================================
+# A standalone entry point for the uv.lock source check, meant to be named by an
+# organization ruleset rule of the type "require workflows to pass before merging":
+#   - workflow: repository autom8y/autom8y-workflows, this path,
+#     .github/workflows/lock-sources-required.yml;
+#   - ref: a pinned full commit SHA of autom8y-workflows (not a branch);
+#   - target: the satellites' default branch;
+#   - bypass list: empty.
+# The ruleset itself is Tom's to create. GitHub runs this file in the TARGET repository
+# on the PR, so the satellite cannot edit, rename or pin it back. A required status check
+# by job name alone is NOT a substitute: any workflow in the satellite runs under the same
+# Actions app and can post a passing check of the same name.
+#
+# The job runs the same steps as the lock-sources job of satellite-ci-reusable.yml, and
+# both run the same runner, script and policy, fetched from autom8y-workflows through the
+# same sparse checkout. The one difference is the canonical ref: here it is
+# github.workflow_sha, which in a required-workflow run should be the commit of this file
+# in autom8y-workflows (the ruleset's pinned SHA). [UV-P: github.workflow_sha resolves to
+# the wrapper's own commit in a required-workflow run | METHOD: docs-cite, or one run that
+# echoes it beside github.workflow_ref | REASON: not local]
+# Both pass --require-canonical-on-main, so the runner refuses (exit 2) a canonical SHA not
+# reachable from autom8y-workflows main: here that catches a ruleset pinned off main, or a
+# workflow_sha that resolves to another, unmerged commit. The runner exempts exactly one
+# target, decided by github.repository (never a caller input): autom8y/autom8y-workflows
+# itself, because on a pull request in this file's own repo github.workflow_sha is the
+# PR's commit, which is not on main yet. [UV-P: on a PR in autom8y-workflows,
+# github.workflow_sha is the PR's commit | METHOD: the planned probe run | REASON: not local]
+#
+# The job runs no caller code: no uv, no project install, nothing from the satellite's
+# tree except its uv.lock.
+
+name: Lock sources (required)
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  lock-sources:
+    name: Lock sources (uv.lock, every package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout caller at github.sha (merge ref, push or merge-queue commit)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          ref: ${{ github.sha }}
+          path: caller-sha
+          persist-credentials: false
+
+      - name: Checkout caller at the PR head (github.sha again outside pull_request)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          path: caller-pr-head
+          persist-credentials: false
+
+      - name: Checkout lock-source runner, script and policy (autom8y-workflows canonical)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          repository: autom8y/autom8y-workflows
+          ref: ${{ github.workflow_sha }}
+          path: .lock-source-canonical
+          sparse-checkout: |
+            .github/scripts/run_lock_sources.py
+            .github/scripts/check_lock_sources.py
+            .github/lock-sources/policy.json
+          sparse-checkout-cone-mode: false
+          # Full history: the runner (--require-canonical-on-main) verifies the canonical
+          # SHA against main in every target except autom8y-workflows itself.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
+        with:
+          python-version: '3.12'
+
+      - name: Check uv.lock sources (every package, exact hosts)
+        env:
+          # A caller cannot set env on a `uses:` job, so these come only from this file.
+          # vars resolves to the CALLER repository's (and org's) variables, so a caller-side
+          # admin can change AWS_ACCOUNT_ID; the pinned account_sha256 in policy.json is
+          # what binds the account (a mismatch exits 3).
+          LOCK_SOURCES_REPO: ${{ github.repository }}
+          LOCK_SOURCES_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head --require-canonical-on-main

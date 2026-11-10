@@ -252,13 +252,121 @@ on:
 
       # --- R1-v3: event-class-invariant canonical checkout SHA ---
       autom8y_workflows_sha:
-        description: 'SHA of autom8y-workflows at which the satellite pinned this reusable workflow. Passed as explicit input to bypass workflow_ref context-variable parsing (R1-v3 mechanism). Required; callers MUST pass github.sha.'
+        description: 'SHA of autom8y-workflows at which the satellite pinned this reusable workflow. Passed as explicit input to bypass workflow_ref context-variable parsing (R1-v3 mechanism). Required; callers MUST pass the literal 40-character autom8y-workflows SHA that their uses line pins (the same SHA), not github.sha, which is the caller''s own commit.'
         required: true
         type: string
 
 jobs:
+  # Lock-source check (install from the lock, PR-1: adds a check, changes no install).
+  # REQUIRED for every caller with a uv.lock. Exit codes: 1 a violation; 2 a vacuous
+  # lock, a missing or malformed account or repository, a missing or malformed policy,
+  # or no uv.lock for a repository listed in the policy; 3 the account does not match
+  # the pinned account hash. There is no input to relax or skip it.
+  # Every other job in this workflow needs lock-sources, and none of them SKIPS when it
+  # fails: a skipped job can satisfy branch protection as skipped. Each dependent runs
+  # under `!cancelled()` (plus its own existing condition) and its first step, "Require
+  # lock-sources success", exits 1 unless needs.lock-sources.result is success, so every
+  # required check turns red.
+  # Residual (F-2): `!cancelled()` is false in a canceled run. If the run is canceled (for
+  # example by a collaborator while lock-sources runs), the dependents never start, so
+  # they cannot fail at their guard. Lock sources then shows as cancelled, which should not
+  # satisfy a required check, but whether never-started dependents read as cancelled or as
+  # skipped is [UV-P: probe PR, cancel during lock-sources, read the check states]. The
+  # H-41 required workflow removes the dependence on this: the gate is its own run.
+  # The same job runs standalone as .github/workflows/lock-sources-required.yml, the
+  # workflow an org ruleset names as a REQUIRED WORKFLOW (H-41). A required status check
+  # by job name alone can be faked by any workflow in the satellite (it runs under the
+  # same Actions app), so a by-name check is a speed bump only, not the gate.
+  # Why a separate job: caller code runs during `uv sync` (the project build and its
+  # backend) and could rewrite uv.lock, the script or the job environment before a
+  # same-job check ran. This job runs NO caller code: it checks out the caller, checks
+  # out the runner, the script and the policy from autom8y-workflows, sets up Python (no
+  # uv, no project install) and runs the runner.
+  # Which commits: github.sha always (the merge ref refs/pull/N/merge on pull_request,
+  # the pushed commit on push, the queue's commit on merge_group), and on pull_request
+  # also the PR head (github.event.pull_request.head.sha). Every tree must pass. Outside
+  # pull_request the second checkout is github.sha again. A satellite that adopts a merge
+  # queue must add a merge_group trigger to its Test workflow.
+  # What it checks: every package in uv.lock. autom8y-* must come from the one fleet
+  # CodeArtifact host, autom8y-<account>.d.codeartifact.us-east-1.amazonaws.com (the
+  # propagator's A6-R1 host rule with the account pinned); other registry packages must
+  # be on that host or on a host the policy names for the caller; git and url sources
+  # fail unless their host is named there; any other non-registry source fails; the
+  # project itself ('.') and the lock's [manifest] members are exempt.
+  # Policy: .github/lock-sources/policy.json in autom8y-workflows holds the pinned
+  # account hash and the per-repository host table. It is fetched through the same
+  # sparse checkout as the script, so neither entry point can carry a drifting copy.
+  # Route: nothing is read from the caller's tree except uv.lock. The canonical checkout
+  # is autom8y-workflows at inputs.autom8y_workflows_sha. This works only when the caller
+  # passes the literal autom8y-workflows SHA as autom8y_workflows_sha, and a satellite
+  # gets this job only after it bumps both its uses pin and that input.
+  # NOT THE GATE (F-1): this job fetches its policy and script at a CALLER-SUPPLIED SHA.
+  # A satellite PR can change inputs.autom8y_workflows_sha in its own Test workflow, so
+  # this job is a fast signal inside the satellite's CI, not the merge gate. The gate is
+  # the H-41 wrapper, lock-sources-required.yml, whose ref the org ruleset pins. As a
+  # partial guard, this job passes --require-canonical-on-main: the runner refuses
+  # (exit 2) unless that SHA is reachable from autom8y-workflows main. That catches an
+  # honest off-main pin, and a commit that changes the policy alone. It cannot stop a
+  # hostile commit, which carries its own runner and simply skips the check: this job
+  # stays caller-controlled end to end. The wrapper passes the same flag; the runner
+  # exempts only autom8y/autom8y-workflows itself, decided by github.repository.
+  lock-sources:
+    name: Lock sources (uv.lock, every package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout caller at github.sha (merge ref, push or merge-queue commit)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          ref: ${{ github.sha }}
+          path: caller-sha
+          persist-credentials: false
+
+      - name: Checkout caller at the PR head (github.sha again outside pull_request)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          path: caller-pr-head
+          persist-credentials: false
+
+      - name: Checkout lock-source runner, script and policy (autom8y-workflows canonical)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          repository: autom8y/autom8y-workflows
+          ref: ${{ inputs.autom8y_workflows_sha }}
+          path: .lock-source-canonical
+          sparse-checkout: |
+            .github/scripts/run_lock_sources.py
+            .github/scripts/check_lock_sources.py
+            .github/lock-sources/policy.json
+          sparse-checkout-cone-mode: false
+          # Full history: the runner (--require-canonical-on-main) verifies the canonical
+          # SHA against main in every target except autom8y-workflows itself.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
+        with:
+          python-version: '3.12'
+
+      - name: Check uv.lock sources (every package, exact hosts)
+        env:
+          # A caller cannot set env on a `uses:` job, so these come only from this file.
+          # vars resolves to the CALLER repository's (and org's) variables, so a caller-side
+          # admin can change AWS_ACCOUNT_ID; the pinned account_sha256 in policy.json is
+          # what binds the account (a mismatch exits 3).
+          LOCK_SOURCES_REPO: ${{ github.repository }}
+          LOCK_SOURCES_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head --require-canonical-on-main
+
   lint:
     name: Lint & Type Check
+    needs: lock-sources
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -266,6 +374,16 @@ jobs:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -598,12 +716,24 @@ jobs:
 
   matrix-prep:
     name: Matrix Prep
+    needs: lock-sources
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
     outputs:
       shard_list: ${{ steps.build.outputs.shard_list }}
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - name: Build shard list
         id: build
         env:
@@ -619,10 +749,10 @@ jobs:
           echo "Resolved shard list for test_splits=${TEST_SPLITS}: ${LIST}"
 
   test:
-    needs: [matrix-prep, lint]
+    needs: [matrix-prep, lint, lock-sources]
     # Keep shard checks running and failing on lint failure. A bare dependency would
     # skip required shards, which can satisfy branch protection as skipped.
-    if: ${{ !cancelled() && needs.matrix-prep.result == 'success' }}
+    if: ${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
     runs-on: ${{ inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.test_timeout }}
@@ -632,9 +762,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list) }}
+        # One shard when matrix-prep failed its lock-sources guard, so Test runs and fails.
+        shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list || '[1]') }}
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - name: Fail shard when lint did not succeed
         if: needs.lint.result != 'success'
         run: |
@@ -1160,8 +1301,8 @@ jobs:
     name: Aggregate Coverage Gate
     # Only runs for sharded callers that opt into the aggregate threshold.
     # Default-off (coverage_threshold_aggregate: 0) — no existing caller breaks.
-    if: inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true
-    needs: test
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.lock-sources.result != 'success') && (inputs.test_splits > 1 && inputs.coverage_threshold_aggregate > 0 && inputs.pytest_disable_coverage != true) }}
+    needs: [test, lock-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1172,6 +1313,16 @@ jobs:
       # (/home/runner/work/<repo>/<repo>/src/...). github.workspace is deterministic
       # per repo, so checking out the caller repo here places the source at exactly
       # those paths — without this, report fails with "No source for code".
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - name: Checkout (source needed for coverage report)
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
@@ -1228,7 +1379,8 @@ jobs:
 
   integration:
     name: Integration Tests
-    if: inputs.run_integration
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.run_integration) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -1236,6 +1388,16 @@ jobs:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
@@ -1500,7 +1662,8 @@ jobs:
 
   convention-check:
     name: Convention Check
-    if: inputs.convention_check
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.convention_check) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1508,6 +1671,16 @@ jobs:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -1801,13 +1974,24 @@ jobs:
 
   spectral-validation:
     name: Spectral Fleet Validation
-    if: inputs.spectral_enabled
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.spectral_enabled) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     timeout-minutes: 5
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -1868,7 +2052,8 @@ jobs:
 
   spec-check:
     name: OpenAPI Spec Drift
-    if: inputs.spec_check_enabled
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.spec_check_enabled) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1876,6 +2061,16 @@ jobs:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -2090,13 +2285,24 @@ jobs:
 
   semantic-score:
     name: Semantic Score Gate
-    if: inputs.semantic_score_enabled
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.semantic_score_enabled) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -2171,13 +2377,24 @@ jobs:
 
   conformance-gate:
     name: Fleet Conformance Gate
-    if: inputs.conformance_gate
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.conformance_gate) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
       contents: read
 
     steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -2256,7 +2473,8 @@ jobs:
   # satellite's main-branch Test run and, through it, satellite-dispatch.
   trivy-gate:
     name: Trivy CRITICAL Gate
-    if: github.event_name == 'pull_request'
+    needs: lock-sources
+    if: ${{ !cancelled() && (github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -2266,6 +2484,16 @@ jobs:
       # autom8y/autom8y is private; the caller's GITHUB_TOKEN cannot read it.
       # Same App-token pattern as the consumer-gate cross-repo download above,
       # narrowed to contents:read on the one repository it reads.
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
       - name: Generate App token for monorepo security policy
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)

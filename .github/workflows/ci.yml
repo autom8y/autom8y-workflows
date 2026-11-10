@@ -93,3 +93,20 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==8.4.2 pyyaml==6.0.2 zizmor==1.23.1
           PATH="$RUNNER_TEMP/venv/bin:$PATH" "$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider tests/test_security_zizmor.py
+
+  lock-source-check-tests:
+    name: Lock-source check tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          persist-credentials: false
+
+      # Standard library only: no install, no network. The tests use a synthetic account.
+      # -S keeps site-packages out, so the run matches the recorded one (the runner image's
+      # PyYAML cannot change what is skipped); -B writes no bytecode into the checkout.
+      - name: Run tests
+        run: python3 -B -S -m unittest -v tests.test_check_lock_sources

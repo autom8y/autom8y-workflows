@@ -1,0 +1,12 @@
+{
+  "_owner": "owner: autom8y-workflows maintainers, changed only in a reviewed PR when the account changes. account_sha256 is the sha256 of the fleet CodeArtifact account id; the id itself is never written here. A repository's hosts change only in a reviewed PR. An unlisted repository gets an empty allowlist (CodeArtifact only); a listed repository must have a uv.lock. autom8y/autom8y-workflows is the one row that names PyPI hosts (pypi.org and files.pythonhosted.org, no direct hosts): its uv.lock is dev-only test tooling for this repository's own CI (pytest and pyyaml), never deployed, and holds no autom8y-* package; autom8y-* packages stay CodeArtifact-only under every row.",
+  "account_sha256": "b75da4b454d54aff1dc5764fae39e82be946a2fc364db024ede54740e51cd104",
+  "repositories": {
+    "autom8y/autom8y-ads": {"registry_hosts": [], "direct_hosts": []},
+    "autom8y/autom8y-asana": {"registry_hosts": [], "direct_hosts": []},
+    "autom8y/autom8y-data": {"registry_hosts": [], "direct_hosts": []},
+    "autom8y/autom8y-scheduling": {"registry_hosts": [], "direct_hosts": []},
+    "autom8y/autom8y-sms": {"registry_hosts": [], "direct_hosts": []},
+    "autom8y/autom8y-workflows": {"registry_hosts": ["pypi.org", "files.pythonhosted.org"], "direct_hosts": []}
+  }
+}
