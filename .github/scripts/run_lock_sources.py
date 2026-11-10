@@ -14,6 +14,12 @@ Usage (from the job's workspace):
   from it, never from the caller's tree.
 * ``--tree``: a checkout of the caller to check, for example ``github.sha=caller-sha`` and
   ``PR-head=caller-pr-head``. Every tree is checked and every one must pass.
+* ``--require-canonical-on-main`` (the reusable job only): refuse, with exit 2, unless the
+  canonical checkout's HEAD is reachable from ``refs/remotes/origin/main``. The reusable
+  job's canonical ref is caller-supplied (``inputs.autom8y_workflows_sha``), so this stops a
+  caller from pointing it at an off-main or fork-network commit with a permissive policy.
+  The H-41 wrapper does not pass it: its ref is the ruleset's pinned commit, and on a pull
+  request in autom8y-workflows itself that commit is not on main yet.
 
 The repository key and the account come from the step's own ``env:`` block, which the
 calling workflow file sets (a caller cannot set env on a ``uses:`` job):
@@ -101,10 +107,31 @@ def parse_tree(value: str) -> tuple[str, Path]:
     return label, Path(path)
 
 
+def canonical_on_main_problem(canonical: Path) -> str | None:
+    """Why the canonical checkout's HEAD cannot be shown to be on autom8y-workflows main."""
+
+    def git(*args: str) -> int:
+        return subprocess.run(["git", "-C", str(canonical), *args], capture_output=True, check=False).returncode
+
+    if git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}") != 0:
+        return "the canonical checkout has no refs/remotes/origin/main to verify against (fetch-depth: 0 is required)"
+    rc = git("merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main")
+    if rc == 1:
+        return "the canonical autom8y-workflows SHA is not reachable from autom8y-workflows main"
+    if rc != 0:
+        return "could not verify that the canonical autom8y-workflows SHA is on main"
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     parser.add_argument("--canonical", required=True, type=Path, help="the autom8y-workflows sparse checkout")
     parser.add_argument("--tree", required=True, action="append", type=parse_tree, help="LABEL=PATH, repeatable")
+    parser.add_argument(
+        "--require-canonical-on-main",
+        action="store_true",
+        help="refuse unless the canonical HEAD is reachable from origin/main (the reusable job only)",
+    )
     args = parser.parse_args(argv)
 
     script = args.canonical / SCRIPT_REL
@@ -114,6 +141,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             " (is the canonical ref the literal autom8y-workflows SHA, at or after PR-1?)"
         )
         return EXIT_USAGE
+    if args.require_canonical_on_main:
+        problem = canonical_on_main_problem(args.canonical)
+        if problem is not None:
+            say(f"::error::{problem}; refusing")
+            return EXIT_USAGE
     try:
         account_sha256, repositories = load_policy(args.canonical / POLICY_REL)
     except PolicyError as exc:

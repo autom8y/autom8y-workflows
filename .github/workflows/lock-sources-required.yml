@@ -15,11 +15,14 @@
 #
 # The job runs the same steps as the lock-sources job of satellite-ci-reusable.yml, and
 # both run the same runner, script and policy, fetched from autom8y-workflows through the
-# same sparse checkout. The only difference is the canonical ref: here it is
+# same sparse checkout. There are two differences. The canonical ref: here it is
 # github.workflow_sha, which in a required-workflow run should be the commit of this file
 # in autom8y-workflows (the ruleset's pinned SHA). [UV-P: github.workflow_sha resolves to
 # the wrapper's own commit in a required-workflow run | METHOD: docs-cite, or one run that
-# echoes it beside github.workflow_ref | REASON: not local]
+# echoes it beside github.workflow_ref | REASON: not local] And the reusable job alone
+# passes --require-canonical-on-main, because its ref is caller-supplied; this wrapper
+# must not, because on a pull request in autom8y-workflows itself (this file's own repo)
+# github.workflow_sha is the PR's commit, which is not on main yet.
 #
 # The job runs no caller code: no uv, no project install, nothing from the satellite's
 # tree except its uv.lock.
@@ -67,6 +70,8 @@ jobs:
             .github/scripts/check_lock_sources.py
             .github/lock-sources/policy.json
           sparse-checkout-cone-mode: false
+          # Full history, so the runner can verify the canonical SHA against main.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python

@@ -55,6 +55,7 @@ each URL refusal is asserted by its exact reason text (RefusalReasons).
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -967,11 +968,61 @@ def _make_workspace(
     return work
 
 
+def _git_env(root: Path) -> dict[str, str]:
+    """An isolated git environment: no user or system config, so no hooks or signing apply."""
+    return {**_clean_env(), "HOME": str(root), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+
+
+def _git(cwd: Path, root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-C", str(cwd), *args],
+        env=_git_env(root), capture_output=True, text=True, timeout=60, check=True,
+    )
+    return result.stdout.strip()
+
+
+_GIT_TEMPLATES: dict[tuple[bool, bool], Path] = {}
+
+
+def _canonical_git_template(on_main: bool, with_main_ref: bool) -> Path:
+    """A cached .git whose detached HEAD is on, or off, refs/remotes/origin/main (built once)."""
+    key = (on_main, with_main_ref)
+    if key not in _GIT_TEMPLATES:
+        root = Path(tempfile.mkdtemp(prefix="lock-sources-git-"))
+        atexit.register(shutil.rmtree, root, True)
+        repo = root / "repo"
+        repo.mkdir()
+        (repo / "README").write_text("fixture\n", encoding="utf-8")
+        _git(repo, root, "init", "-q", "--template=")  # no sample hooks to copy
+        _git(repo, root, "add", "-A")
+        _git(repo, root, "commit", "-q", "-m", "chore(test): canonical commit on main")
+        main_sha = _git(repo, root, "rev-parse", "HEAD")
+        if with_main_ref:
+            _git(repo, root, "update-ref", "refs/remotes/origin/main", main_sha)
+        if not on_main:
+            _git(repo, root, "checkout", "-q", "-b", "side")
+            _git(repo, root, "commit", "-q", "--allow-empty", "-m", "chore(test): commit off main")
+        _git(repo, root, "checkout", "-q", "--detach")
+        _GIT_TEMPLATES[key] = repo / ".git"
+    return _GIT_TEMPLATES[key]
+
+
+def _make_canonical_git(work: Path, root: Path, *, on_main: bool, with_main_ref: bool = True) -> None:
+    """Make the canonical directory a git checkout whose HEAD is on, or off, origin/main.
+
+    Only HEAD and refs/remotes/origin/main matter to the runner's check, so a cached .git is
+    copied in; the canonical files on disk (runner, script, policy) are what the runner reads.
+    """
+    shutil.copytree(_canonical_git_template(on_main, with_main_ref), work / _CANONICAL_DIR / ".git")
+
+
 def _both(lock_text: str) -> dict[str, str]:
     return {tree: lock_text for _, tree in _TREES}
 
 
 RUNNER_ARGS = [f"--canonical={_CANONICAL_DIR}"] + [f"--tree={label}={tree}" for label, tree in _TREES]
+ON_MAIN_FLAG = "--require-canonical-on-main"
 
 
 class _RunnerCase(unittest.TestCase):
@@ -984,16 +1035,26 @@ class _RunnerCase(unittest.TestCase):
         policy: dict | str | None = TEST_POLICY,
         with_script: bool = True,
         extra_env: dict[str, str] | None = None,
+        extra_args: list[str] | None = None,
+        canonical_git: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """``canonical_git``: None (not a git checkout), "main", "off-main" or "no-main-ref"."""
         with tempfile.TemporaryDirectory() as tmp:
             work = _make_workspace(Path(tmp), locks, policy=policy, with_script=with_script)
-            env = {**_clean_env(), **(extra_env or {})}
+            if canonical_git is not None:
+                if shutil.which("git") is None:
+                    self.skipTest("git not available")
+                _make_canonical_git(
+                    work, Path(tmp), on_main=canonical_git == "main", with_main_ref=canonical_git != "no-main-ref"
+                )
+            env = {**_git_env(Path(tmp)), "GIT_CEILING_DIRECTORIES": tmp, **(extra_env or {})}
             if repo is not None:
                 env[runner_mod.REPO_ENV] = repo
             if account is not None:
                 env[runner_mod.ACCOUNT_ENV] = account
             result = subprocess.run(
-                [sys.executable, "-I", str(work / _CANONICAL_DIR / ".github" / "scripts" / RUNNER.name), *RUNNER_ARGS],
+                [sys.executable, "-I", str(work / _CANONICAL_DIR / ".github" / "scripts" / RUNNER.name), *RUNNER_ARGS,
+                 *(extra_args or [])],
                 cwd=work, env=env, capture_output=True, text=True, timeout=120, check=False,
             )
         out = result.stdout + result.stderr
@@ -1120,6 +1181,34 @@ class Runner(_RunnerCase):
         self.assertRunner(_both(render_lock(clean_packages())), 0)  # the step-env name is read
 
 
+class RunnerCanonicalOnMain(_RunnerCase):
+    """F-1: --require-canonical-on-main refuses a canonical SHA not reachable from main."""
+
+    MESSAGE = "the canonical autom8y-workflows SHA is not reachable from autom8y-workflows main; refusing"
+
+    def test_on_main_passes(self) -> None:
+        out = self.assertRunner(_both(render_lock(clean_packages())), 0, canonical_git="main", extra_args=[ON_MAIN_FLAG])
+        self.assertEqual(out.count("OK: "), 2)
+
+    def test_off_main_refuses_with_exit_2(self) -> None:
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, canonical_git="off-main", extra_args=[ON_MAIN_FLAG])
+        self.assertIn(f"::error::{self.MESSAGE}", out)
+        self.assertNotIn("::group::", out)  # refused before any tree is checked
+
+    def test_without_the_flag_off_main_is_not_refused(self) -> None:
+        # The wrapper's path: its own commit may legitimately be off main (a PR in this repo).
+        self.assertRunner(_both(render_lock(clean_packages())), 0, canonical_git="off-main")
+
+    def test_no_main_ref_refuses(self) -> None:
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, canonical_git="no-main-ref", extra_args=[ON_MAIN_FLAG])
+        self.assertIn("no refs/remotes/origin/main to verify against", out)
+
+    def test_not_a_git_checkout_refuses(self) -> None:
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, extra_args=[ON_MAIN_FLAG])
+        self.assertIn("::error::", out)
+        self.assertNotIn("::group::", out)
+
+
 # --- Wiring twin: the reusable job and the standalone wrapper ------------------------------
 
 _JOB = "lock-sources"
@@ -1129,6 +1218,11 @@ _RUN_COMMAND = (
     "python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical"
     " --tree github.sha=caller-sha --tree PR-head=caller-pr-head"
 )
+# F-1: only the reusable job (caller-supplied canonical ref) requires the canonical SHA on main.
+_RUN_COMMAND_FOR = {
+    "satellite-ci-reusable.yml": _RUN_COMMAND + " " + ON_MAIN_FLAG,
+    "lock-sources-required.yml": _RUN_COMMAND,
+}
 _SPARSE = (".github/scripts/run_lock_sources.py", ".github/scripts/check_lock_sources.py", ".github/lock-sources/policy.json")
 _CANONICAL_REF = {
     "satellite-ci-reusable.yml": "${{ inputs.autom8y_workflows_sha }}",
@@ -1331,7 +1425,7 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(uses, ["actions/checkout", "actions/checkout", "actions/checkout", "actions/setup-python"])
                 runs = [s for s in steps if _fields(s, "run")]
                 self.assertEqual(runs, [self.check_step(wf)])
-                self.assertEqual(_field(self.check_step(wf), "run"), _RUN_COMMAND)
+                self.assertEqual(_field(self.check_step(wf), "run"), _RUN_COMMAND_FOR[wf.name])
                 self.assertIn("    permissions:", self.job(wf))
                 self.assertIn("      contents: read", self.job(wf))
 
@@ -1359,6 +1453,7 @@ class WorkflowWiring(unittest.TestCase):
                 canonical = next(s for s in steps if s[0] == _CANONICAL_STEP)
                 self.assertEqual(_field(canonical, "repository"), "autom8y/autom8y-workflows")
                 self.assertEqual(sorted(_sparse_paths(canonical)), sorted(_SPARSE))
+                self.assertEqual(_field(canonical, "fetch-depth"), "0")  # F-1: history to verify main
                 for rel in _SPARSE:
                     self.assertTrue((REPO_ROOT / rel).is_file(), msg=rel)
                 for s in steps:
@@ -1378,12 +1473,20 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertNotIn("toJSON", wf.read_text(encoding="utf-8"))
 
     def test_wrapper_and_reusable_job_are_identical_except_the_canonical_ref(self) -> None:
+        """Identical except (1) the canonical ref and (2) F-1: the reusable run line's flag."""
+        reusable_run = f"        run: {_RUN_COMMAND_FOR[WORKFLOW.name]}"
+        wrapper_run = f"        run: {_RUN_COMMAND_FOR[WRAPPER.name]}"
+        self.assertEqual(self.job(WORKFLOW).count(reusable_run), 1)
+        self.assertEqual(self.job(WRAPPER).count(wrapper_run), 1)
+
         def normalized(wf: Path) -> list[str]:
             lines = [l.replace(_CANONICAL_REF[wf.name], "<canonical-ref>") for l in self.job(wf)]
+            lines = [wrapper_run if l == reusable_run else l for l in lines]  # the one allowed difference
             while lines and not lines[-1].strip():
                 lines.pop()
             return lines
         self.assertEqual(normalized(WORKFLOW), normalized(WRAPPER))
+        self.assertNotIn(ON_MAIN_FLAG, WRAPPER.read_text(encoding="utf-8").split("jobs:", 1)[1])
 
     def test_workflows_sha_input_says_literal_sha(self) -> None:
         desc = _field(_input_block("autom8y_workflows_sha"), "description")
@@ -1400,12 +1503,13 @@ class WorkflowWiring(unittest.TestCase):
                 data = yaml.safe_load(wf.read_text(encoding="utf-8"))
                 job = data["jobs"][_JOB]
                 step = next(s for s in job["steps"] if s.get("name") == _STEP_NAME.split("name: ", 1)[1])
-                self.assertEqual(step["run"], _RUN_COMMAND)
+                self.assertEqual(step["run"], _RUN_COMMAND_FOR[wf.name])
                 self.assertEqual(step["env"], {runner_mod.REPO_ENV: "${{ github.repository }}", runner_mod.ACCOUNT_ENV: "${{ vars.AWS_ACCOUNT_ID }}"})
                 self.assertNotIn("continue-on-error", step)
                 self.assertNotIn("if", job)
                 canonical = next(s for s in job["steps"] if s.get("name") == _CANONICAL_STEP.split("name: ", 1)[1])
                 self.assertEqual(sorted(canonical["with"]["sparse-checkout"].split()), sorted(_SPARSE))
+                self.assertEqual(canonical["with"]["fetch-depth"], 0)
         data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
         for name, other in data["jobs"].items():
             if name != _JOB:
@@ -1424,6 +1528,7 @@ class WorkflowWiring(unittest.TestCase):
         repo: str = "autom8y/autom8y-sms",
         account: str = FAKE_ACCOUNT,
         policy: dict | None = None,
+        canonical_on_main: bool = True,
     ) -> dict[str, object]:
         bash = shutil.which("bash")
         if bash is None:
@@ -1431,13 +1536,18 @@ class WorkflowWiring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             work = _make_workspace(tmp, locks, policy=policy if policy is not None else TEST_POLICY)
+            if shutil.which("git") is None:
+                self.skipTest("git not available")
+            # The canonical checkout as GitHub leaves it (fetch-depth 0): HEAD on origin/main.
+            _make_canonical_git(work, tmp, on_main=canonical_on_main)
             shim = tmp / "bin"
             shim.mkdir()
             (shim / "python3").symlink_to(sys.executable)
             step_file = tmp / "step.sh"
             step_file.write_text(_field(self.check_step(wf), "run") + "\n", encoding="utf-8")
             env = {
-                **_clean_env(),
+                **_git_env(tmp),
+                "GIT_CEILING_DIRECTORIES": str(tmp),
                 "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}",
                 runner_mod.REPO_ENV: repo,
                 runner_mod.ACCOUNT_ENV: account,
@@ -1465,6 +1575,15 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(self._job_run(wf, {}, repo="autom8y/not-listed")["rc"], 0)
                 self.assertEqual(self._job_run(wf, _both(clean), account="")["rc"], 2)
                 self.assertEqual(self._job_run(wf, _both(clean), account=OTHER_ACCOUNT)["rc"], 3)
+
+    def test_canonical_off_main_refused_only_in_the_reusable_job(self) -> None:
+        """F-1, both sides: the reusable job refuses an off-main canonical SHA; the wrapper does not."""
+        clean = _both(render_lock(clean_packages()))
+        reusable = self._job_run(WORKFLOW, clean, canonical_on_main=False)
+        self.assertEqual(reusable["rc"], 2, msg=reusable)
+        self.assertIn("not reachable from autom8y-workflows main", str(reusable["out"]))
+        self.assertEqual(self._job_run(WRAPPER, clean, canonical_on_main=False)["rc"], 0)
+        self.assertEqual(self._job_run(WORKFLOW, clean, canonical_on_main=True)["rc"], 0)
 
     def test_real_policy_refuses_the_synthetic_account_with_exit_3(self) -> None:
         for wf in self.WORKFLOWS:

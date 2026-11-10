@@ -294,6 +294,15 @@ jobs:
   # is autom8y-workflows at inputs.autom8y_workflows_sha. This works only when the caller
   # passes the literal autom8y-workflows SHA as autom8y_workflows_sha, and a satellite
   # gets this job only after it bumps both its uses pin and that input.
+  # NOT THE GATE (F-1): this job fetches its policy and script at a CALLER-SUPPLIED SHA.
+  # A satellite PR can change inputs.autom8y_workflows_sha in its own Test workflow, so
+  # this job is a fast signal inside the satellite's CI, not the merge gate. The gate is
+  # the H-41 wrapper, lock-sources-required.yml, whose ref the org ruleset pins. As a
+  # partial guard, this job alone passes --require-canonical-on-main: the runner refuses
+  # (exit 2) unless that SHA is reachable from autom8y-workflows main, which rules out
+  # an off-main or fork-network commit carrying a permissive policy. The wrapper does
+  # not pass the flag, because on a pull request in autom8y-workflows itself its own
+  # commit is not on main yet.
   lock-sources:
     name: Lock sources (uv.lock, every package)
     runs-on: ubuntu-latest
@@ -327,6 +336,8 @@ jobs:
             .github/scripts/check_lock_sources.py
             .github/lock-sources/policy.json
           sparse-checkout-cone-mode: false
+          # Full history, so the runner can verify the canonical SHA against main.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -342,7 +353,7 @@ jobs:
           # what binds the account (a mismatch exits 3).
           LOCK_SOURCES_REPO: ${{ github.repository }}
           LOCK_SOURCES_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
-        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head
+        run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head --require-canonical-on-main
 
   lint:
     name: Lint & Type Check
