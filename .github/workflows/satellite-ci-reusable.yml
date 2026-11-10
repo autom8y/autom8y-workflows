@@ -267,6 +267,12 @@ jobs:
   # under `!cancelled()` (plus its own existing condition) and its first step, "Require
   # lock-sources success", exits 1 unless needs.lock-sources.result is success, so every
   # required check turns red.
+  # Residual (F-2): `!cancelled()` is false in a canceled run. If the run is canceled (for
+  # example by a collaborator while lock-sources runs), the dependents never start, so
+  # they cannot fail at their guard. Lock sources then shows as cancelled, which should not
+  # satisfy a required check, but whether never-started dependents read as cancelled or as
+  # skipped is [UV-P: probe PR, cancel during lock-sources, read the check states]. The
+  # H-41 required workflow removes the dependence on this: the gate is its own run.
   # The same job runs standalone as .github/workflows/lock-sources-required.yml, the
   # workflow an org ruleset names as a REQUIRED WORKFLOW (H-41). A required status check
   # by job name alone can be faked by any workflow in the satellite (it runs under the

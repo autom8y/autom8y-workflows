@@ -1403,6 +1403,16 @@ class WorkflowWiring(unittest.TestCase):
         self.assertEqual(_job_names(_lines(WRAPPER)), [_JOB])
         self.assertNotIn(GUARD_NAME, WRAPPER.read_text(encoding="utf-8"))
 
+    def test_comments_state_the_residuals(self) -> None:
+        """F-1 and F-2 are stated where a maintainer reads the reusable job."""
+        text = " ".join(l.strip().lstrip("# ") for l in _lines(WORKFLOW) if l.strip().startswith("#"))
+        # F-1: the reusable job is not the gate.
+        self.assertIn("NOT THE GATE (F-1): this job fetches its policy and script at a CALLER-SUPPLIED SHA.", text)
+        self.assertIn("The gate is the H-41 wrapper, lock-sources-required.yml", text)
+        # F-2: a canceled run gets past !cancelled(); H-41 removes the dependence on it.
+        self.assertIn("Residual (F-2): `!cancelled()` is false in a canceled run.", text)
+        self.assertIn("H-41 required workflow removes the dependence on this", text)
+
     def test_wrapper_triggers_and_single_job(self) -> None:
         lines = _lines(WRAPPER)
         on = lines.index("on:")
