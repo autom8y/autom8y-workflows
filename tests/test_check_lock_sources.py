@@ -1692,5 +1692,26 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertFalse(self._job_run(WRAPPER, _both(render_lock(clean_packages())), repo=repo)["job_fails"])
 
 
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CI_COMMAND = "python3 -B -S -m unittest -v tests.test_check_lock_sources"
+
+
+class CiJob(unittest.TestCase):
+    """F-4: this repository's CI runs the suite with the same command the run log records."""
+
+    def test_ci_runs_the_recorded_command(self) -> None:
+        job = _job_lines(CI_WORKFLOW, "lock-source-check-tests")
+        self.assertEqual(_fields(job, "run"), [CI_COMMAND])
+        self.assertEqual(_job_key(job, "timeout-minutes"), ["10"])
+
+    def test_the_command_runs_standard_library_only(self) -> None:
+        # -S keeps site-packages out: the PyYAML cross-check must skip, whatever is installed.
+        self.assertIn(" -S ", f" {CI_COMMAND} ")
+        self.assertIn(" -B ", f" {CI_COMMAND} ")
+        if sys.flags.no_site:
+            with self.assertRaises(ImportError):
+                import yaml  # type: ignore[import-untyped]  # noqa: F401
+
+
 if __name__ == "__main__":
     unittest.main()
