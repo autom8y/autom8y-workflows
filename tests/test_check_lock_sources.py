@@ -1532,6 +1532,12 @@ class WorkflowWiring(unittest.TestCase):
         # F-1: the reusable job is not the gate.
         self.assertIn("NOT THE GATE (F-1): this job fetches its policy and script at a CALLER-SUPPLIED SHA.", text)
         self.assertIn("The gate is the H-41 wrapper, lock-sources-required.yml", text)
+        # G-2: the flag's limits are stated, not overstated.
+        self.assertIn("It cannot stop a hostile commit, which carries its own runner and simply skips the check", text)
+        self.assertNotIn("fork-network commit carrying a permissive policy", text)
+        runner_doc = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("It\n  cannot stop a hostile commit: that commit carries its own copy of this runner", runner_doc)
+        self.assertNotIn("fork-network", runner_doc)
         # F-2: a canceled run gets past !cancelled(); H-41 removes the dependence on it.
         self.assertIn("Residual (F-2): `!cancelled()` is false in a canceled run.", text)
         self.assertIn("H-41 required workflow removes the dependence on this", text)

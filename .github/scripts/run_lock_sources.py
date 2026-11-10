@@ -16,8 +16,11 @@ Usage (from the job's workspace):
   ``PR-head=caller-pr-head``. Every tree is checked and every one must pass.
 * ``--require-canonical-on-main`` (both entry points pass it): refuse, with exit 2, unless
   the canonical checkout's HEAD is reachable from ``refs/remotes/origin/main``. The reusable
-  job's canonical ref is caller-supplied (``inputs.autom8y_workflows_sha``), so this stops a
-  caller from pointing it at an off-main or fork-network commit with a permissive policy.
+  job's canonical ref is caller-supplied (``inputs.autom8y_workflows_sha``). There the
+  check catches an honest off-main pin, and a commit that changes the policy alone. It
+  cannot stop a hostile commit: that commit carries its own copy of this runner, which
+  simply skips the check. So the reusable job stays caller-controlled end to end, and only
+  the H-41 wrapper, whose ref the ruleset pins, is the gate.
   In the H-41 wrapper the ref is the ruleset's pinned commit, and the check catches a pin,
   or a ``github.workflow_sha``, that is not on main.
   ONE EXEMPTION, decided only by ``LOCK_SOURCES_REPO`` (``github.repository``, never a

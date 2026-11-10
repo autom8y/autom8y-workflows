@@ -305,10 +305,11 @@ jobs:
   # this job is a fast signal inside the satellite's CI, not the merge gate. The gate is
   # the H-41 wrapper, lock-sources-required.yml, whose ref the org ruleset pins. As a
   # partial guard, this job passes --require-canonical-on-main: the runner refuses
-  # (exit 2) unless that SHA is reachable from autom8y-workflows main, which rules out
-  # an off-main or fork-network commit carrying a permissive policy. The wrapper passes
-  # the same flag; the runner exempts only autom8y/autom8y-workflows itself, decided by
-  # github.repository.
+  # (exit 2) unless that SHA is reachable from autom8y-workflows main. That catches an
+  # honest off-main pin, and a commit that changes the policy alone. It cannot stop a
+  # hostile commit, which carries its own runner and simply skips the check: this job
+  # stays caller-controlled end to end. The wrapper passes the same flag; the runner
+  # exempts only autom8y/autom8y-workflows itself, decided by github.repository.
   lock-sources:
     name: Lock sources (uv.lock, every package)
     runs-on: ubuntu-latest
