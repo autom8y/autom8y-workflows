@@ -938,6 +938,43 @@ class HomeRepoRow(_ScriptCase):
         self.assertCheck(render_lock([local_pkg("autom8y-example", "editable", "."), registry_pkg("httpx")]), 2, repo=SATELLITES[0])
 
 
+class VacuityKeyedOnHomeName(_ScriptCase):
+    """G-5: the relaxed vacuity rule is keyed on autom8y/autom8y-workflows by NAME, not on a row's hosts."""
+
+    def setUp(self) -> None:
+        # A lock with registry packages, none of them autom8y-*, all on hosts the row allows.
+        self.pypi_only = render_lock([local_pkg("some-project", "editable", "."), pypi_pkg("certifi", "2025.1.1")])
+        self.ca_only = render_lock([local_pkg("some-project", "editable", "."), registry_pkg("httpx")])
+
+    def test_a_satellite_row_with_registry_hosts_keeps_the_anchor_rule(self) -> None:
+        # PYPI_REPO's row names the PyPI hosts, as a future satellite row might: still vacuous (2).
+        result = self.run_check(self.pypi_only, repo=PYPI_REPO)
+        self.assertEqual(result.returncode, 2, msg=result.stdout + result.stderr)
+        self.assertIn("VACUOUS", result.stderr)
+        # The same lock with one autom8y-* package on CodeArtifact passes under that row (0).
+        with_first_party = _append_packages(self.pypi_only, [registry_pkg("autom8y-auth", "4.3.0")])
+        self.assertEqual(self.run_check(with_first_party, repo=PYPI_REPO).returncode, 0)
+
+    def test_the_home_name_is_relaxed_whatever_its_row(self) -> None:
+        home_row = json.dumps({HOME_REPO: HOME_ROW})
+        self.assertEqual(self.run_check(self.pypi_only, repo=HOME_REPO, allowlist=home_row).returncode, 0)
+        # Even with no row at all (CodeArtifact only), a home lock of CodeArtifact packages passes.
+        self.assertEqual(self.run_check(self.ca_only, repo=HOME_REPO, allowlist="{}").returncode, 0)
+        # Casefolded, as GitHub names are.
+        self.assertEqual(self.run_check(self.ca_only, repo="Autom8y/Autom8y-Workflows", allowlist="{}").returncode, 0)
+
+    def test_near_names_of_home_are_not_relaxed(self) -> None:
+        for repo in ("autom8y/autom8y-workflows-x", "someone/autom8y-workflows", "autom8y/autom8y-workflow"):
+            with self.subTest(repo=repo):
+                allowlist = json.dumps({repo: HOME_ROW})
+                result = self.run_check(self.pypi_only, repo=repo, allowlist=allowlist)
+                self.assertEqual(result.returncode, 2, msg=result.stdout + result.stderr)
+
+    def test_the_home_name_still_needs_one_registry_package(self) -> None:
+        root_only = render_lock([local_pkg("autom8y-workflows-tests", "virtual", ".")])
+        self.assertEqual(self.run_check(root_only, repo=HOME_REPO, allowlist=json.dumps({HOME_REPO: HOME_ROW})).returncode, 2)
+
+
 # --- Runner ------------------------------------------------------------------------------
 
 _CANONICAL_DIR = ".lock-source-canonical"

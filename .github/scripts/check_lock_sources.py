@@ -53,8 +53,8 @@ A query string or fragment fails, except on a git source (where uv records ``?re
 ``#commit``).
 
 Exit codes: 0 ok; 1 at least one violation; 2 vacuous (no autom8y-* registry package was
-checked; for a repository whose row names registry hosts, no registry package at all was
-checked) or a usage error (missing or malformed account, repository or pinned hash, bad
+checked; for autom8y/autom8y-workflows itself, whose lock is test tooling, no registry
+package at all was checked) or a usage error (missing or malformed account, repository or pinned hash, bad
 allowlist, unreadable or malformed lock, Python < 3.11); 3 the account does not match the
 pinned account hash. Every line of output masks any run of 12 or more digits as ``<acct>``.
 
@@ -73,6 +73,9 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 NAME_PREFIX = "autom8y-"
+# The one repository whose lock may hold no autom8y-* package (its own dev-only test
+# tooling). The relaxed vacuity rule is keyed on this NAME, never on the shape of a row.
+HOME_REPO = "autom8y/autom8y-workflows"
 HOST_TEMPLATE = "autom8y-{account}.d.codeartifact.us-east-1.amazonaws.com"
 REGISTRY_PATH_PREFIX = "/pypi/autom8y-python/simple/"
 ARTIFACT_PATH_PREFIX = "/pypi/autom8y-python/"
@@ -447,11 +450,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if violations:
         emit(f"FAIL: {counted} {NAME_PREFIX}* registry package(s) checked, {len(violations)} violation(s) ({scope})")
         return EXIT_VIOLATION
-    if counted == 0 and not (policy.registry_hosts and registry_total > 0):
-        # A repository whose policy row names registry hosts (only autom8y-workflows itself,
-        # whose lock is dev-only test tooling) may have no autom8y-* package, but it still
-        # must have at least one registry package checked. Every other repository keeps
-        # the anchor rule: no autom8y-* registry package is vacuous.
+    if counted == 0 and not (repo.casefold() == HOME_REPO.casefold() and registry_total > 0):
+        # autom8y/autom8y-workflows itself (by name; its lock is dev-only test tooling) may
+        # have no autom8y-* package, but it still must have at least one registry package
+        # checked. Every other repository keeps the anchor rule, whatever its row says: no
+        # autom8y-* registry package is vacuous. So a future row that gives a satellite
+        # registry hosts cannot also drop that satellite's anchor rule.
         emit(f"VACUOUS: no {NAME_PREFIX}* registry packages in {args.lock} ({scope})", stream=sys.stderr)
         return EXIT_USAGE
     emit(
