@@ -1026,12 +1026,16 @@ def _git(cwd: Path, root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-_GIT_TEMPLATES: dict[tuple[bool, bool], Path] = {}
+_GIT_TEMPLATES: dict[tuple[bool, bool, bool], Path] = {}
 
 
-def _canonical_git_template(on_main: bool, with_main_ref: bool) -> Path:
-    """A cached .git whose detached HEAD is on, or off, refs/remotes/origin/main (built once)."""
-    key = (on_main, with_main_ref)
+def _canonical_git_template(on_main: bool, with_main_ref: bool, unborn_head: bool = False) -> Path:
+    """A cached .git whose detached HEAD is on, or off, refs/remotes/origin/main (built once).
+
+    ``unborn_head``: origin/main resolves but HEAD names a branch with no commit, so
+    ``git merge-base --is-ancestor HEAD ...`` fails with an error code (neither 0 nor 1).
+    """
+    key = (on_main, with_main_ref, unborn_head)
     if key not in _GIT_TEMPLATES:
         root = Path(tempfile.mkdtemp(prefix="lock-sources-git-"))
         atexit.register(shutil.rmtree, root, True)
@@ -1047,18 +1051,21 @@ def _canonical_git_template(on_main: bool, with_main_ref: bool) -> Path:
         if not on_main:
             _git(repo, root, "checkout", "-q", "-b", "side")
             _git(repo, root, "commit", "-q", "--allow-empty", "-m", "chore(test): commit off main")
-        _git(repo, root, "checkout", "-q", "--detach")
+        if unborn_head:
+            _git(repo, root, "checkout", "-q", "--orphan", "unborn")
+        else:
+            _git(repo, root, "checkout", "-q", "--detach")
         _GIT_TEMPLATES[key] = repo / ".git"
     return _GIT_TEMPLATES[key]
 
 
-def _make_canonical_git(work: Path, root: Path, *, on_main: bool, with_main_ref: bool = True) -> None:
+def _make_canonical_git(work: Path, root: Path, *, on_main: bool, with_main_ref: bool = True, unborn_head: bool = False) -> None:
     """Make the canonical directory a git checkout whose HEAD is on, or off, origin/main.
 
     Only HEAD and refs/remotes/origin/main matter to the runner's check, so a cached .git is
     copied in; the canonical files on disk (runner, script, policy) are what the runner reads.
     """
-    shutil.copytree(_canonical_git_template(on_main, with_main_ref), work / _CANONICAL_DIR / ".git")
+    shutil.copytree(_canonical_git_template(on_main, with_main_ref, unborn_head), work / _CANONICAL_DIR / ".git")
 
 
 def _both(lock_text: str) -> dict[str, str]:
@@ -1082,14 +1089,15 @@ class _RunnerCase(unittest.TestCase):
         extra_args: list[str] | None = None,
         canonical_git: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """``canonical_git``: None (not a git checkout), "main", "off-main" or "no-main-ref"."""
+        """``canonical_git``: None (not a git checkout), "main", "off-main", "no-main-ref" or "unborn-head"."""
         with tempfile.TemporaryDirectory() as tmp:
             work = _make_workspace(Path(tmp), locks, policy=policy, with_script=with_script)
             if canonical_git is not None:
                 if shutil.which("git") is None:
                     self.skipTest("git not available")
                 _make_canonical_git(
-                    work, Path(tmp), on_main=canonical_git == "main", with_main_ref=canonical_git != "no-main-ref"
+                    work, Path(tmp), on_main=canonical_git == "main", with_main_ref=canonical_git != "no-main-ref",
+                    unborn_head=canonical_git == "unborn-head",
                 )
             env = {**_git_env(Path(tmp)), "GIT_CEILING_DIRECTORIES": tmp, **(extra_env or {})}
             if repo is not None:
@@ -1270,6 +1278,12 @@ class RunnerCanonicalOnMain(_RunnerCase):
     def test_without_the_flag_off_main_is_not_refused(self) -> None:
         # The wrapper's path: its own commit may legitimately be off main (a PR in this repo).
         self.assertRunner(_both(render_lock(clean_packages())), 0, canonical_git="off-main")
+
+    def test_merge_base_error_refuses(self) -> None:
+        """G-4 (b): origin/main resolves, but the ancestry check itself errors (rc neither 0 nor 1)."""
+        out = self.assertRunner(_both(render_lock(clean_packages())), 2, canonical_git="unborn-head", extra_args=[ON_MAIN_FLAG])
+        self.assertIn("::error::could not verify that the canonical autom8y-workflows SHA is on main; refusing", out)
+        self.assertNotIn("::group::", out)
 
     def test_no_main_ref_refuses(self) -> None:
         out = self.assertRunner(_both(render_lock(clean_packages())), 2, canonical_git="no-main-ref", extra_args=[ON_MAIN_FLAG])
