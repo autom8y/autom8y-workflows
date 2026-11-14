@@ -213,9 +213,9 @@ on:
         type: boolean
         default: false
 
-      # --- Optional retained prebuilt wheels for the trusted data repository ---
+      # --- Optional retained prebuilt wheels for the listed trusted private repositories ---
       retain_prebuilt_wheels:
-        description: 'Allow setup-uv to retain prebuilt wheels only for autom8y/autom8y-data private default-branch trusted runs. Default false.'
+        description: 'Allow setup-uv to retain prebuilt wheels only for the listed trusted private repositories (autom8y-data, autom8y-ads, autom8y-sms, autom8y-scheduling) on private default-branch push or dispatch runs, behind the fail-closed cache scan. Default false.'
         type: boolean
         default: false
 
@@ -394,8 +394,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           # Default remains pruning. Retention is unavailable to every caller except
-          # the exact trusted private repository and default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # the listed trusted private repositories and the default-branch event condition.
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -580,7 +580,7 @@ jobs:
   # `range()` primitive. Cost: one ~5-second prep job per invocation, amortized
   # over the shard speedup whenever sharding is active.
       - name: Scan retained uv cache for credentials
-        if: inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           CODEARTIFACT_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
@@ -821,8 +821,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           # Default remains pruning. Retention is unavailable to every caller except
-          # the exact trusted private repository and default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # the listed trusted private repositories and the default-branch event condition.
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -1163,7 +1163,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Scan retained uv cache for credentials
-        if: inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           CODEARTIFACT_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
@@ -1418,8 +1418,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           # Default remains pruning. Retention is unavailable to every caller except
-          # the exact trusted private repository and default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # the listed trusted private repositories and the default-branch event condition.
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -1526,7 +1526,7 @@ jobs:
           fi
 
       - name: Scan retained uv cache for credentials
-        if: inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           CODEARTIFACT_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
@@ -1691,8 +1691,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           # Default remains pruning. Retention is unavailable to every caller except
-          # the exact trusted private repository and default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # the listed trusted private repositories and the default-branch event condition.
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -1838,7 +1838,7 @@ jobs:
           echo "Convention check passed (framework spans excluded from failure gate)"
 
       - name: Scan retained uv cache for credentials
-        if: inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           CODEARTIFACT_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
@@ -2085,8 +2085,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           # Default remains pruning. Retention is unavailable to every caller except
-          # the exact trusted private repository and default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # the listed trusted private repositories and the default-branch event condition.
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
@@ -2149,7 +2149,7 @@ jobs:
         run: uv run --no-sources python ${{ inputs.spec_check_validate_script }}
 
       - name: Scan retained uv cache for credentials
-        if: inputs.retain_prebuilt_wheels && github.repository == 'autom8y/autom8y-data' && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           CODEARTIFACT_TOKEN: ${{ steps.codeartifact.outputs.token }}
         run: |
