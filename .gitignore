@@ -18,10 +18,12 @@ __pycache__/
 # KNOSSOS:START channel-ignores
 # Auto-managed by ari sync — channel directories are regenerated on every sync.
 # Each channel also has a provenance-driven .gitignore for per-file precision.
+.agents/skills/
 .claude/
 .codex/
 .gemini/
 .mcp.json
+.mcp.json.meta
 .opencode/
 # KNOSSOS:END channel-ignores
 
@@ -32,9 +34,47 @@ __pycache__/
 !**/.sos/land/
 !**/.sos/land/**
 **/.ledge/*
+!**/.ledge/reviews/
+!**/.ledge/reviews/**
+!**/.ledge/specs/
+!**/.ledge/specs/**
+!**/.ledge/decisions/
+!**/.ledge/decisions/**
 !**/.ledge/shelf/
 !**/.ledge/shelf/**
-**/.knossos/
+!**/.ledge/spikes/
+!**/.ledge/spikes/**
+!**/.ledge/proposals/
+!**/.ledge/proposals/**
+!**/.ledge/handoffs/
+!**/.ledge/handoffs/**
+# .knossos/worktrees/ — managed worktree pool; gitignored-by-construction.
+**/.knossos/*
+!**/.knossos/config/
+**/.knossos/config/*
+!**/.knossos/config/mcp-pool-grants.yaml
+!**/.knossos/rites/
+!**/.knossos/rites/**
+**/.worktrees/
+.a8/
+.envrc
+.envrc.local
+.env/
+/.env
+/.env.*
+.env.keys
+secretspec.toml
+**/.knossos/rites/**/*.pem
+**/.knossos/rites/**/*.key
+**/.knossos/rites/**/*.p12
+**/.knossos/rites/**/*.pfx
+**/.knossos/rites/**/*.tfstate
+**/.knossos/rites/**/*.tfstate.*
+**/.knossos/rites/**/.env
+**/.knossos/rites/**/.env.*
+**/.knossos/rites/**/id_rsa*
+**/.knossos/rites/**/id_ecdsa*
+**/.knossos/rites/**/id_ed25519*
 # KNOSSOS:END infra-ignores
 
 # Scratch / temporary files (PT-00.5 recurrence prevention)
