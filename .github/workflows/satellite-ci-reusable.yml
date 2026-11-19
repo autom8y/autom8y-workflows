@@ -19,6 +19,11 @@
 # NOTE: The permissions block is REQUIRED. Without it, GitHub Actions inherits
 # the org default (read-only), which blocks OIDC token generation and causes
 # all jobs to fail with startup_failure (0 jobs created).
+#
+# AWS roles (S-122 S2): lint, test, convention-check and spec-check assume
+# github-actions-ci-read, which trusts only the pull_request and main-branch
+# subjects and grants a CodeArtifact read token plus one S3 object. Only the
+# integration job still assumes github-actions-deploy (see its comment).
 
 name: Satellite CI
 
@@ -405,7 +410,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
           aws-region: us-east-1
 
       - name: Get CodeArtifact auth token
@@ -832,7 +837,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
           aws-region: us-east-1
 
       - name: Get CodeArtifact auth token
@@ -928,10 +933,12 @@ jobs:
         if: hashFiles('scripts/ci_fetch_pinned_mysql_scanner.sh') != '' && steps.cache-mysql-scanner.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The github-actions-deploy role (assumed above via OIDC) holds s3:GetObject
-          # on the duckdb-extensions/v1.4.4/linux_amd64/* prefix (monorepo #312), so
+          # The github-actions-ci-read role (assumed above via OIDC) holds s3:GetObject
+          # on exactly this one object,
+          # duckdb-extensions/v1.4.4/linux_amd64/mysql_scanner.duckdb_extension.gz
+          # (S-122 S2; deploy held the whole linux_amd64/* prefix, monorepo #312), so
           # the presigned URL it mints is itself fetchable by curl -fSL (presign
-          # inherits the caller's perms).
+          # inherits the caller's perms). A new key needs a ci-read policy change first.
           FETCH_URL=$(aws s3 presign \
             s3://autom8y-terraform/duckdb-extensions/v1.4.4/linux_amd64/mysql_scanner.duckdb_extension.gz \
             --expires-in 1800)
@@ -1429,6 +1436,12 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
         with:
+          # Integration stays on github-actions-deploy (S-122 S2): its pytest run
+          # holds these credentials and may reach live AWS beyond CodeArtifact, which
+          # github-actions-ci-read does not grant. The satellite callers turn
+          # run_integration on for push events only (the input defaults to false);
+          # once deploy drops pull_request (S3), a PR that turns it on fails closed
+          # here.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
           aws-region: us-east-1
 
@@ -1702,7 +1715,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
           aws-region: us-east-1
 
       - name: Get CodeArtifact auth token
@@ -2091,7 +2104,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
           aws-region: us-east-1
 
       - name: Get CodeArtifact auth token
