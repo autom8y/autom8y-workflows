@@ -188,14 +188,20 @@ on:
       # workflow's run_id and force-reinstalls it BEFORE running tests so the
       # satellite's existing test suite executes against the candidate
       # behaviour, not the registry-pinned version. All four inputs are
-      # required to be passed together; if any one is missing the candidate
-      # path is skipped (normal CI continues unaffected).
+      # passed together or not at all (S-126): the consumer-gate inputs guard,
+      # the step right after the lock-sources guard in the lint and test jobs,
+      # fails the job when only some are set (whitespace counts as empty), and
+      # with none set the candidate
+      # path is skipped and normal CI runs unchanged. On a candidate run every
+      # later `uv run` skips its sync (UV_NO_SYNC), and the consumer-gate check
+      # (.github/scripts/consumer_gate_candidate.py) fails the job unless the
+      # environment still holds the candidate after the last `uv run`.
       candidate_sdk_name:
         description: 'Distribution name of the candidate SDK (sdk-contract-governance Sprint 3)'
         type: string
         default: ''
       candidate_sdk_version:
-        description: 'Candidate SDK version string for logging and the run name'
+        description: 'Candidate SDK version (PEP 440). Shown in the run name, and the consumer-gate check fails the job unless the installed candidate is this version'
         type: string
         default: ''
       candidate_wheel_run_id:
@@ -389,6 +395,469 @@ jobs:
           fi
           echo "lock-sources succeeded"
 
+      # S-126 consumer-gate inputs guard (B4), with no `if:`. It runs right after
+      # the lock-sources guard, which stays the first step of every dependent
+      # job (B-2, tests/test_check_lock_sources.py), and before every other step.
+      # The four candidate inputs are set together or not at all; whitespace
+      # counts as empty. With none set (normal CI) it writes mode=none and
+      # calls no Python, so normal CI is unchanged. With all four set it writes
+      # the consumer-gate helper, a verbatim copy of
+      # .github/scripts/consumer_gate_candidate.py (refresh both copies with
+      # .github/scripts/embed_consumer_gate_candidate.py), whose guard requires
+      # a valid distribution name, a PEP 440 version, a numeric run id and a
+      # correlation id; only then mode=candidate. Every candidate step below
+      # runs on mode == 'candidate', so the download, the install, the pytest
+      # plugin and the re-read share this one condition.
+      - name: Consumer-gate inputs guard (all four or none)
+        id: consumer-gate-guard
+        shell: bash
+        env:
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_RUN_ID: ${{ inputs.candidate_wheel_run_id }}
+          CONSUMER_GATE_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
+        run: |
+          set -euo pipefail
+          SET_COUNT=0
+          for VALUE in "$CONSUMER_GATE_SDK_NAME" "$CONSUMER_GATE_SDK_VERSION" "$CONSUMER_GATE_WHEEL_RUN_ID" "$CONSUMER_GATE_CORRELATION_ID"; do
+            if [ -n "${VALUE//[[:space:]]/}" ]; then
+              SET_COUNT=$((SET_COUNT + 1))
+            fi
+          done
+          if [ "$SET_COUNT" -eq 0 ]; then
+            echo "consumer-gate inputs: none set; normal CI"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SET_COUNT" -ne 4 ]; then
+            echo "::error::consumer-gate inputs: ${SET_COUNT} of 4 set. candidate_sdk_name, candidate_sdk_version, candidate_wheel_run_id and dispatch_correlation_id are set together or not at all (whitespace counts as empty)"
+            exit 1
+          fi
+          HELPER_DIR="${RUNNER_TEMP}/consumer-gate"
+          mkdir -p "$HELPER_DIR"
+          cat > "${HELPER_DIR}/consumer_gate_candidate.py" <<'CONSUMER_GATE_CANDIDATE_PY'
+          """Consumer-gate candidate check for satellite-ci-reusable.yml (S-126).
+
+          A plain `uv run` syncs to uv.lock, replacing the candidate SDK wheel with the
+          locked version while the run still succeeds. This check fails such a run.
+          The workflow embeds this file verbatim in the inputs guard step of the lint and
+          test jobs; after editing it, run .github/scripts/embed_consumer_gate_candidate.py
+          (tests/test_workflow_validation.py fails on drift). Entry points:
+
+              python3 -I consumer_gate_candidate.py guard    inputs guard, stdlib only
+              pytest -p consumer_gate_candidate ...          assert in pytest_configure
+              <project python> -I consumer_gate_candidate.py verify    re-read, exit 1
+
+          Inputs come from the environment only (CONSUMER_GATE_*). The assert requires:
+          exactly one .whl in the candidate folder; its METADATA Name and Version equal
+          the expected ones (PEP 503, PEP 440) and agree with its file name; the gate's
+          <sdk>-manifest.json names the same sdk, version and file; exactly one
+          installed distribution of that name, at that version; and its direct_url.json
+          (MANDATORY: index and lock installs write none) names that exact wheel.
+          """
+
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import sys
+          import zipfile
+          from email.parser import HeaderParser
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from urllib.request import url2pathname
+
+          ENV_NAME = "CONSUMER_GATE_SDK_NAME"
+          ENV_VERSION = "CONSUMER_GATE_SDK_VERSION"
+          ENV_RUN_ID = "CONSUMER_GATE_WHEEL_RUN_ID"
+          ENV_CORRELATION_ID = "CONSUMER_GATE_CORRELATION_ID"
+          ENV_WHEEL_DIR = "CONSUMER_GATE_WHEEL_DIR"
+
+          # (environment variable, workflow input it carries)
+          GUARD_INPUTS = (
+              (ENV_NAME, "candidate_sdk_name"),
+              (ENV_VERSION, "candidate_sdk_version"),
+              (ENV_RUN_ID, "candidate_wheel_run_id"),
+              (ENV_CORRELATION_ID, "dispatch_correlation_id"),
+          )
+
+          REPORT_SOURCE = "source=candidate-wheel"
+
+          # The permissive PEP 440 version pattern (PEP 440 Appendix B, the form that
+          # packaging.version uses), matched with fullmatch, so no surrounding
+          # whitespace or trailing newline is accepted.
+          _VERSION_RE = re.compile(
+              r"""
+              v?
+              (?:
+                  (?:(?P<epoch>[0-9]+)!)?
+                  (?P<release>[0-9]+(?:\.[0-9]+)*)
+                  (?P<pre>
+                      [-_\.]?
+                      (?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)
+                      [-_\.]?
+                      (?P<pre_n>[0-9]+)?
+                  )?
+                  (?P<post>
+                      (?:-(?P<post_n1>[0-9]+))
+                      |
+                      (?:
+                          [-_\.]?
+                          (?P<post_l>post|rev|r)
+                          [-_\.]?
+                          (?P<post_n2>[0-9]+)?
+                      )
+                  )?
+                  (?P<dev>
+                      [-_\.]?
+                      (?P<dev_l>dev)
+                      [-_\.]?
+                      (?P<dev_n>[0-9]+)?
+                  )?
+              )
+              (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?
+              """,
+              re.VERBOSE | re.IGNORECASE | re.ASCII,
+          )
+          # A PEP 508 distribution name.
+          _NAME_RE = re.compile(r"[A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9]", re.IGNORECASE | re.ASCII)
+          _RUN_ID_RE = re.compile(r"[1-9][0-9]*", re.ASCII)
+          _CORRELATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*", re.ASCII)
+          _METADATA_MEMBER_RE = re.compile(r"[^/]+\.dist-info/METADATA")
+          _PRE_LETTERS = {
+              "a": "a",
+              "alpha": "a",
+              "b": "b",
+              "beta": "b",
+              "c": "rc",
+              "pre": "rc",
+              "preview": "rc",
+              "rc": "rc",
+          }
+
+
+          class CandidateError(Exception):
+              """The run does not hold the candidate that the gate dispatched."""
+
+
+          def normalize_name(name: str) -> str:
+              """Return the PEP 503 normalized form of a distribution name."""
+              return re.sub(r"[-_.]+", "-", name).lower()
+
+
+          def is_valid_version(text: str) -> bool:
+              """Return True when text is a valid PEP 440 version."""
+              return _VERSION_RE.fullmatch(text) is not None
+
+
+          def version_key(text: str) -> tuple[object, ...]:
+              """Return a key that is equal for two versions exactly when PEP 440 says they are.
+
+              It mirrors the normalization of packaging.version.Version: epoch, the
+              release with trailing zeros dropped, the pre, post and dev parts with
+              their spellings normalized, and the local part split on its separators.
+              """
+              match = _VERSION_RE.fullmatch(text)
+              if match is None:
+                  raise CandidateError(f"not a PEP 440 version: {text!r}")
+              release = [int(part) for part in match.group("release").split(".")]
+              while len(release) > 1 and release[-1] == 0:
+                  release.pop()
+              pre = None
+              if match.group("pre_l"):
+                  pre = (_PRE_LETTERS[match.group("pre_l").lower()], int(match.group("pre_n") or 0))
+              post = None
+              if match.group("post_n1") is not None:
+                  post = int(match.group("post_n1"))
+              elif match.group("post_l"):
+                  post = int(match.group("post_n2") or 0)
+              dev = None
+              if match.group("dev_l"):
+                  dev = int(match.group("dev_n") or 0)
+              local = None
+              if match.group("local"):
+                  local = tuple(
+                      int(part) if part.isdigit() else part.lower()
+                      for part in re.split(r"[-_.]", match.group("local"))
+                  )
+              return (int(match.group("epoch") or 0), tuple(release), pre, post, dev, local)
+
+
+          def versions_equal(left: str, right: str) -> bool:
+              """Compare two version strings under PEP 440."""
+              return version_key(left) == version_key(right)
+
+
+          def check_guard_inputs(environ: dict[str, str]) -> list[str]:
+              """Return the problems with the four candidate inputs; empty means candidate mode.
+
+              The guard runs only when the step's bash prelude counted at least one
+              set input, so here all four must be set: whitespace counts as empty.
+              """
+              values = {key: environ.get(key, "") for key, _ in GUARD_INPUTS}
+              blank = [label for key, label in GUARD_INPUTS if not values[key].strip()]
+              if blank:
+                  return [
+                      "all four candidate inputs must be set together, or none of them; "
+                      "unset or blank: " + ", ".join(blank)
+                  ]
+              problems = []
+              if _NAME_RE.fullmatch(values[ENV_NAME]) is None:
+                  problems.append("candidate_sdk_name is not a valid distribution name (PEP 508)")
+              if not is_valid_version(values[ENV_VERSION]):
+                  problems.append("candidate_sdk_version is not a valid PEP 440 version")
+              if _RUN_ID_RE.fullmatch(values[ENV_RUN_ID]) is None:
+                  problems.append("candidate_wheel_run_id is not a numeric workflow run id")
+              if _CORRELATION_ID_RE.fullmatch(values[ENV_CORRELATION_ID]) is None:
+                  problems.append(
+                      "dispatch_correlation_id holds a character outside letters, digits, '.', '_' and '-'"
+                  )
+              return problems
+
+
+          def read_expected(environ: dict[str, str]) -> tuple[str, str, Path]:
+              """Read and validate the expected name, version and wheel folder."""
+              name = environ.get(ENV_NAME, "")
+              version = environ.get(ENV_VERSION, "")
+              wheel_dir = environ.get(ENV_WHEEL_DIR, "")
+              if _NAME_RE.fullmatch(name) is None:
+                  raise CandidateError(f"{ENV_NAME} is unset or not a valid distribution name")
+              if not is_valid_version(version):
+                  raise CandidateError(f"{ENV_VERSION} is unset or not a PEP 440 version")
+              if not wheel_dir.strip():
+                  raise CandidateError(f"{ENV_WHEEL_DIR} is unset")
+              return name, version, Path(wheel_dir)
+
+
+          def find_single_wheel(wheel_dir: Path) -> Path:
+              """Return the one .whl under wheel_dir (searched recursively, as the install step's find does)."""
+              if not wheel_dir.is_dir():
+                  raise CandidateError(f"the candidate-wheel folder {wheel_dir} does not exist")
+              wheels = sorted(path for path in wheel_dir.rglob("*.whl") if path.is_file())
+              if len(wheels) != 1:
+                  raise CandidateError(
+                      f"expected exactly one .whl under {wheel_dir}, found {len(wheels)}"
+                  )
+              return wheels[0]
+
+
+          def read_wheel_metadata(wheel: Path) -> tuple[str, str]:
+              """Return the Name and Version from the wheel's own METADATA."""
+              try:
+                  with zipfile.ZipFile(wheel) as archive:
+                      members = [
+                          member
+                          for member in archive.namelist()
+                          if _METADATA_MEMBER_RE.fullmatch(member)
+                      ]
+                      if len(members) != 1:
+                          raise CandidateError(
+                              f"{wheel.name} holds {len(members)} top-level .dist-info/METADATA files, not 1"
+                          )
+                      text = archive.read(members[0]).decode("utf-8")
+              except (OSError, zipfile.BadZipFile, UnicodeDecodeError) as exc:
+                  raise CandidateError(f"cannot read the METADATA of {wheel.name}: {exc}") from None
+              headers = HeaderParser().parsestr(text)
+              name = (headers.get("Name") or "").strip()
+              version = (headers.get("Version") or "").strip()
+              if not name or not version:
+                  raise CandidateError(f"the METADATA of {wheel.name} lacks a Name or a Version")
+              if not is_valid_version(version):
+                  raise CandidateError(f"the METADATA of {wheel.name} holds a non-PEP 440 Version")
+              return name, version
+
+
+          def check_wheel_file_name(wheel: Path, name: str, version: str) -> None:
+              """Check that the wheel file name names the same distribution and version as its METADATA."""
+              parts = wheel.name[: -len(".whl")].split("-")
+              if len(parts) not in (5, 6):
+                  raise CandidateError(f"{wheel.name} is not a valid wheel file name")
+              file_name, file_version = parts[0], parts[1]
+              if normalize_name(file_name) != normalize_name(name):
+                  raise CandidateError(f"{wheel.name} does not name the distribution {name}")
+              if not is_valid_version(file_version) or not versions_equal(file_version, version):
+                  raise CandidateError(f"{wheel.name} does not name the version {version}")
+
+
+          def check_manifest(wheel_dir: Path, wheel: Path, name: str, version: str) -> None:
+              """Cross-check the <sdk>-manifest.json that the gate's build-wheel step writes beside the wheel."""
+              manifest = wheel_dir / f"{name}-manifest.json"
+              try:
+                  data = json.loads(manifest.read_text(encoding="utf-8"))
+              except FileNotFoundError:
+                  raise CandidateError(f"the artifact holds no {manifest.name}") from None
+              except (OSError, ValueError) as exc:
+                  raise CandidateError(f"cannot read {manifest.name}: {exc}") from None
+              if not isinstance(data, dict):
+                  raise CandidateError(f"{manifest.name} is not a JSON object")
+              sdk = data.get("sdk")
+              manifest_version = data.get("version")
+              wheel_filename = data.get("wheel_filename")
+              if not isinstance(sdk, str) or normalize_name(sdk) != normalize_name(name):
+                  raise CandidateError(f"{manifest.name} names another sdk than {name}")
+              if (
+                  not isinstance(manifest_version, str)
+                  or not is_valid_version(manifest_version)
+                  or not versions_equal(manifest_version, version)
+              ):
+                  raise CandidateError(f"{manifest.name} names another version than {version}")
+              if wheel_filename != wheel.name:
+                  raise CandidateError(f"{manifest.name} names another wheel file than {wheel.name}")
+
+
+          def find_installed(name: str, path: list[str] | None = None):
+              """Return the single installed distribution named name (PEP 503 normalized).
+
+              path defaults to sys.path, the import path of the running interpreter.
+              """
+              import importlib.metadata
+
+              wanted = normalize_name(name)
+              kwargs = {} if path is None else {"path": path}
+              found = {}
+              for dist in importlib.metadata.distributions(**kwargs):
+                  try:
+                      dist_name = dist.metadata.get("Name")
+                  except Exception:  # noqa: BLE001 - a broken distribution cannot be the candidate
+                      continue
+                  if not dist_name or normalize_name(dist_name) != wanted:
+                      continue
+                  # The same folder can sit on the import path twice; count each
+                  # .dist-info folder once. PathDistribution keeps it in _path.
+                  location = getattr(dist, "_path", None)
+                  key = os.path.realpath(str(location)) if location is not None else str(id(dist))
+                  found[key] = dist
+              if len(found) != 1:
+                  raise CandidateError(
+                      f"expected exactly one installed distribution of {name}, found {len(found)}"
+                  )
+              return next(iter(found.values()))
+
+
+          def check_direct_url(dist, name: str, wheel: Path) -> None:
+              """Require a direct_url.json that names the candidate wheel itself (PEP 610)."""
+              raw = dist.read_text("direct_url.json")
+              if raw is None:
+                  raise CandidateError(
+                      f"the installed {name} has no direct_url.json, so it was not installed from "
+                      "the candidate wheel (an install from an index or from uv.lock writes none)"
+                  )
+              try:
+                  data = json.loads(raw)
+              except ValueError:
+                  raise CandidateError(f"the direct_url.json of the installed {name} is not JSON") from None
+              url = data.get("url") if isinstance(data, dict) else None
+              if not isinstance(url, str):
+                  raise CandidateError(f"the direct_url.json of the installed {name} has no url")
+              parts = urlsplit(url)
+              if parts.scheme != "file" or parts.netloc not in ("", "localhost"):
+                  raise CandidateError(
+                      f"the installed {name} came from a {parts.scheme or 'schemeless'} URL, "
+                      "not from the candidate wheel"
+                  )
+              installed_from = os.path.realpath(url2pathname(parts.path))
+              if installed_from != os.path.realpath(str(wheel)):
+                  raise CandidateError(
+                      f"the installed {name} came from {Path(installed_from).name}, "
+                      f"not from the candidate wheel {wheel.name}"
+                  )
+
+
+          def verify_candidate(environ: dict[str, str], path: list[str] | None = None) -> str:
+              """Run the full assert and return the report line, or raise CandidateError."""
+              name, version, wheel_dir = read_expected(environ)
+              wheel = find_single_wheel(wheel_dir)
+              wheel_name, wheel_version = read_wheel_metadata(wheel)
+              if normalize_name(wheel_name) != normalize_name(name):
+                  raise CandidateError(f"the candidate wheel is {wheel_name}, not {name}")
+              if not versions_equal(wheel_version, version):
+                  raise CandidateError(
+                      f"the candidate wheel is {wheel_name} {wheel_version}, not version {version}"
+                  )
+              check_wheel_file_name(wheel, wheel_name, wheel_version)
+              check_manifest(wheel_dir, wheel, name, version)
+              dist = find_installed(name, path)
+              installed_version = dist.version
+              if not isinstance(installed_version, str) or not is_valid_version(installed_version):
+                  raise CandidateError(f"the installed {name} has no valid version")
+              if not versions_equal(installed_version, version):
+                  raise CandidateError(
+                      f"the installed {name} is {installed_version}, not the candidate {version}: "
+                      "the environment was synced away from the candidate (a plain `uv run` "
+                      "syncs to uv.lock)"
+                  )
+              check_direct_url(dist, name, wheel)
+              return f"consumer-gate: {dist.metadata.get('Name')}=={installed_version} {REPORT_SOURCE}"
+
+
+          def _command_text(message: str) -> str:
+              """Escape a message for a GitHub workflow command (one line, % escaped)."""
+              return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+          # --- pytest plugin (loaded with `pytest -p consumer_gate_candidate`) ------------
+
+          _REPORT_LINE: str | None = None
+
+
+          def pytest_configure(config) -> None:
+              """Refuse the whole session unless this interpreter holds the candidate."""
+              global _REPORT_LINE
+              try:
+                  _REPORT_LINE = verify_candidate(dict(os.environ))
+              except CandidateError as exc:
+                  from pytest import UsageError
+
+                  raise UsageError(f"consumer-gate: REFUSED: {exc}") from None
+
+
+          def pytest_report_header(config) -> list[str]:
+              """Print the candidate under test in pytest's header."""
+              return [_REPORT_LINE] if _REPORT_LINE else []
+
+
+          def pytest_terminal_summary(terminalreporter) -> None:
+              """Repeat the line at the end, where --no-header cannot hide it."""
+              if _REPORT_LINE:
+                  terminalreporter.write_line(_REPORT_LINE)
+
+
+          # --- command line -------------------------------------------------------------
+
+
+          def main(argv: list[str]) -> int:
+              """Run the guard or the verify command; return the exit code."""
+              environ = dict(os.environ)
+              if argv == ["guard"]:
+                  problems = check_guard_inputs(environ)
+                  if problems:
+                      for problem in problems:
+                          print(f"::error::consumer-gate inputs guard: {_command_text(problem)}")
+                      return 1
+                  print(
+                      "consumer-gate inputs guard: all four inputs set and well formed; "
+                      f"candidate {environ[ENV_NAME]}=={environ[ENV_VERSION]}"
+                  )
+                  return 0
+              if argv == ["verify"]:
+                  try:
+                      line = verify_candidate(environ)
+                  except CandidateError as exc:
+                      print(f"::error::consumer-gate: REFUSED: {_command_text(str(exc))}")
+                      return 1
+                  print(line)
+                  return 0
+              print("usage: consumer_gate_candidate.py guard|verify", file=sys.stderr)
+              return 2
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          CONSUMER_GATE_CANDIDATE_PY
+          python3 -I "${HELPER_DIR}/consumer_gate_candidate.py" guard
+          echo "mode=candidate" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
@@ -473,7 +942,7 @@ jobs:
       # convention-check, contract-tests jobs).
       - name: Generate App token for cross-repo artifact download (consumer-gate)
         id: cross-repo-app-token
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
         with:
           app-id: ${{ secrets.APP_ID }}
@@ -482,7 +951,7 @@ jobs:
           repositories: autom8y
 
       - name: Download candidate SDK wheel (consumer-gate)
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
           name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
@@ -492,7 +961,7 @@ jobs:
           github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         run: |
           set -euo pipefail
           ls -la _candidate-wheel/
@@ -534,6 +1003,14 @@ jobs:
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           echo "candidate-constraints: $(wc -l < _candidate-constraints.txt) pinned requirements"
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
+          # S-126 (B1): a plain `uv run` syncs the environment to uv.lock first,
+          # which uninstalls this candidate and reinstalls the locked version
+          # (ruff format below would revert it before mypy). Every later `uv run`
+          # in this job must skip that sync, so set UV_NO_SYNC for the rest of
+          # the job. This step runs only in candidate mode, so normal CI never
+          # sees it. tests/test_workflow_validation.py fails if a later step can
+          # undo it or runs `uv run` in a way it does not cover.
+          echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: uv run --no-sources ruff format . --check
@@ -575,6 +1052,19 @@ jobs:
             echo "No configspec.toml or secretspec.toml found — skipping spec validation"
           fi
           exit $EXIT
+
+      # S-126 (B2): re-read the candidate after the last `uv run` of this job.
+      # Lint runs no pytest, so this is its only proof that ruff, mypy and the
+      # spec validation saw the candidate. `uv run --no-sync` reads the same
+      # project environment without syncing it; a plain `uv run` here would
+      # itself re-sync to uv.lock. Exit 1 on any mismatch.
+      - name: Re-read candidate after the last uv run (consumer-gate)
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
+        env:
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_DIR: ${{ github.workspace }}/_candidate-wheel
+        run: uv run --no-sync --no-sources python -I "${RUNNER_TEMP}/consumer-gate/consumer_gate_candidate.py" verify
 
   # Sprint 2 (FR-1): Emits the matrix shard list for the `test` job. When
   # `test_splits <= 1` (the default for every satellite except autom8y-data at
@@ -781,6 +1271,460 @@ jobs:
           fi
           echo "lock-sources succeeded"
 
+      # S-126 consumer-gate inputs guard (B4): the same step as the lint job's
+      # (see its comment), right after the lock-sources guard here too and with
+      # no `if:`. Each shard is its own job, so each shard runs the guard, the
+      # plugin and the re-read.
+      - name: Consumer-gate inputs guard (all four or none)
+        id: consumer-gate-guard
+        shell: bash
+        env:
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_RUN_ID: ${{ inputs.candidate_wheel_run_id }}
+          CONSUMER_GATE_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
+        run: |
+          set -euo pipefail
+          SET_COUNT=0
+          for VALUE in "$CONSUMER_GATE_SDK_NAME" "$CONSUMER_GATE_SDK_VERSION" "$CONSUMER_GATE_WHEEL_RUN_ID" "$CONSUMER_GATE_CORRELATION_ID"; do
+            if [ -n "${VALUE//[[:space:]]/}" ]; then
+              SET_COUNT=$((SET_COUNT + 1))
+            fi
+          done
+          if [ "$SET_COUNT" -eq 0 ]; then
+            echo "consumer-gate inputs: none set; normal CI"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SET_COUNT" -ne 4 ]; then
+            echo "::error::consumer-gate inputs: ${SET_COUNT} of 4 set. candidate_sdk_name, candidate_sdk_version, candidate_wheel_run_id and dispatch_correlation_id are set together or not at all (whitespace counts as empty)"
+            exit 1
+          fi
+          HELPER_DIR="${RUNNER_TEMP}/consumer-gate"
+          mkdir -p "$HELPER_DIR"
+          cat > "${HELPER_DIR}/consumer_gate_candidate.py" <<'CONSUMER_GATE_CANDIDATE_PY'
+          """Consumer-gate candidate check for satellite-ci-reusable.yml (S-126).
+
+          A plain `uv run` syncs to uv.lock, replacing the candidate SDK wheel with the
+          locked version while the run still succeeds. This check fails such a run.
+          The workflow embeds this file verbatim in the inputs guard step of the lint and
+          test jobs; after editing it, run .github/scripts/embed_consumer_gate_candidate.py
+          (tests/test_workflow_validation.py fails on drift). Entry points:
+
+              python3 -I consumer_gate_candidate.py guard    inputs guard, stdlib only
+              pytest -p consumer_gate_candidate ...          assert in pytest_configure
+              <project python> -I consumer_gate_candidate.py verify    re-read, exit 1
+
+          Inputs come from the environment only (CONSUMER_GATE_*). The assert requires:
+          exactly one .whl in the candidate folder; its METADATA Name and Version equal
+          the expected ones (PEP 503, PEP 440) and agree with its file name; the gate's
+          <sdk>-manifest.json names the same sdk, version and file; exactly one
+          installed distribution of that name, at that version; and its direct_url.json
+          (MANDATORY: index and lock installs write none) names that exact wheel.
+          """
+
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import sys
+          import zipfile
+          from email.parser import HeaderParser
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from urllib.request import url2pathname
+
+          ENV_NAME = "CONSUMER_GATE_SDK_NAME"
+          ENV_VERSION = "CONSUMER_GATE_SDK_VERSION"
+          ENV_RUN_ID = "CONSUMER_GATE_WHEEL_RUN_ID"
+          ENV_CORRELATION_ID = "CONSUMER_GATE_CORRELATION_ID"
+          ENV_WHEEL_DIR = "CONSUMER_GATE_WHEEL_DIR"
+
+          # (environment variable, workflow input it carries)
+          GUARD_INPUTS = (
+              (ENV_NAME, "candidate_sdk_name"),
+              (ENV_VERSION, "candidate_sdk_version"),
+              (ENV_RUN_ID, "candidate_wheel_run_id"),
+              (ENV_CORRELATION_ID, "dispatch_correlation_id"),
+          )
+
+          REPORT_SOURCE = "source=candidate-wheel"
+
+          # The permissive PEP 440 version pattern (PEP 440 Appendix B, the form that
+          # packaging.version uses), matched with fullmatch, so no surrounding
+          # whitespace or trailing newline is accepted.
+          _VERSION_RE = re.compile(
+              r"""
+              v?
+              (?:
+                  (?:(?P<epoch>[0-9]+)!)?
+                  (?P<release>[0-9]+(?:\.[0-9]+)*)
+                  (?P<pre>
+                      [-_\.]?
+                      (?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)
+                      [-_\.]?
+                      (?P<pre_n>[0-9]+)?
+                  )?
+                  (?P<post>
+                      (?:-(?P<post_n1>[0-9]+))
+                      |
+                      (?:
+                          [-_\.]?
+                          (?P<post_l>post|rev|r)
+                          [-_\.]?
+                          (?P<post_n2>[0-9]+)?
+                      )
+                  )?
+                  (?P<dev>
+                      [-_\.]?
+                      (?P<dev_l>dev)
+                      [-_\.]?
+                      (?P<dev_n>[0-9]+)?
+                  )?
+              )
+              (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?
+              """,
+              re.VERBOSE | re.IGNORECASE | re.ASCII,
+          )
+          # A PEP 508 distribution name.
+          _NAME_RE = re.compile(r"[A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9]", re.IGNORECASE | re.ASCII)
+          _RUN_ID_RE = re.compile(r"[1-9][0-9]*", re.ASCII)
+          _CORRELATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*", re.ASCII)
+          _METADATA_MEMBER_RE = re.compile(r"[^/]+\.dist-info/METADATA")
+          _PRE_LETTERS = {
+              "a": "a",
+              "alpha": "a",
+              "b": "b",
+              "beta": "b",
+              "c": "rc",
+              "pre": "rc",
+              "preview": "rc",
+              "rc": "rc",
+          }
+
+
+          class CandidateError(Exception):
+              """The run does not hold the candidate that the gate dispatched."""
+
+
+          def normalize_name(name: str) -> str:
+              """Return the PEP 503 normalized form of a distribution name."""
+              return re.sub(r"[-_.]+", "-", name).lower()
+
+
+          def is_valid_version(text: str) -> bool:
+              """Return True when text is a valid PEP 440 version."""
+              return _VERSION_RE.fullmatch(text) is not None
+
+
+          def version_key(text: str) -> tuple[object, ...]:
+              """Return a key that is equal for two versions exactly when PEP 440 says they are.
+
+              It mirrors the normalization of packaging.version.Version: epoch, the
+              release with trailing zeros dropped, the pre, post and dev parts with
+              their spellings normalized, and the local part split on its separators.
+              """
+              match = _VERSION_RE.fullmatch(text)
+              if match is None:
+                  raise CandidateError(f"not a PEP 440 version: {text!r}")
+              release = [int(part) for part in match.group("release").split(".")]
+              while len(release) > 1 and release[-1] == 0:
+                  release.pop()
+              pre = None
+              if match.group("pre_l"):
+                  pre = (_PRE_LETTERS[match.group("pre_l").lower()], int(match.group("pre_n") or 0))
+              post = None
+              if match.group("post_n1") is not None:
+                  post = int(match.group("post_n1"))
+              elif match.group("post_l"):
+                  post = int(match.group("post_n2") or 0)
+              dev = None
+              if match.group("dev_l"):
+                  dev = int(match.group("dev_n") or 0)
+              local = None
+              if match.group("local"):
+                  local = tuple(
+                      int(part) if part.isdigit() else part.lower()
+                      for part in re.split(r"[-_.]", match.group("local"))
+                  )
+              return (int(match.group("epoch") or 0), tuple(release), pre, post, dev, local)
+
+
+          def versions_equal(left: str, right: str) -> bool:
+              """Compare two version strings under PEP 440."""
+              return version_key(left) == version_key(right)
+
+
+          def check_guard_inputs(environ: dict[str, str]) -> list[str]:
+              """Return the problems with the four candidate inputs; empty means candidate mode.
+
+              The guard runs only when the step's bash prelude counted at least one
+              set input, so here all four must be set: whitespace counts as empty.
+              """
+              values = {key: environ.get(key, "") for key, _ in GUARD_INPUTS}
+              blank = [label for key, label in GUARD_INPUTS if not values[key].strip()]
+              if blank:
+                  return [
+                      "all four candidate inputs must be set together, or none of them; "
+                      "unset or blank: " + ", ".join(blank)
+                  ]
+              problems = []
+              if _NAME_RE.fullmatch(values[ENV_NAME]) is None:
+                  problems.append("candidate_sdk_name is not a valid distribution name (PEP 508)")
+              if not is_valid_version(values[ENV_VERSION]):
+                  problems.append("candidate_sdk_version is not a valid PEP 440 version")
+              if _RUN_ID_RE.fullmatch(values[ENV_RUN_ID]) is None:
+                  problems.append("candidate_wheel_run_id is not a numeric workflow run id")
+              if _CORRELATION_ID_RE.fullmatch(values[ENV_CORRELATION_ID]) is None:
+                  problems.append(
+                      "dispatch_correlation_id holds a character outside letters, digits, '.', '_' and '-'"
+                  )
+              return problems
+
+
+          def read_expected(environ: dict[str, str]) -> tuple[str, str, Path]:
+              """Read and validate the expected name, version and wheel folder."""
+              name = environ.get(ENV_NAME, "")
+              version = environ.get(ENV_VERSION, "")
+              wheel_dir = environ.get(ENV_WHEEL_DIR, "")
+              if _NAME_RE.fullmatch(name) is None:
+                  raise CandidateError(f"{ENV_NAME} is unset or not a valid distribution name")
+              if not is_valid_version(version):
+                  raise CandidateError(f"{ENV_VERSION} is unset or not a PEP 440 version")
+              if not wheel_dir.strip():
+                  raise CandidateError(f"{ENV_WHEEL_DIR} is unset")
+              return name, version, Path(wheel_dir)
+
+
+          def find_single_wheel(wheel_dir: Path) -> Path:
+              """Return the one .whl under wheel_dir (searched recursively, as the install step's find does)."""
+              if not wheel_dir.is_dir():
+                  raise CandidateError(f"the candidate-wheel folder {wheel_dir} does not exist")
+              wheels = sorted(path for path in wheel_dir.rglob("*.whl") if path.is_file())
+              if len(wheels) != 1:
+                  raise CandidateError(
+                      f"expected exactly one .whl under {wheel_dir}, found {len(wheels)}"
+                  )
+              return wheels[0]
+
+
+          def read_wheel_metadata(wheel: Path) -> tuple[str, str]:
+              """Return the Name and Version from the wheel's own METADATA."""
+              try:
+                  with zipfile.ZipFile(wheel) as archive:
+                      members = [
+                          member
+                          for member in archive.namelist()
+                          if _METADATA_MEMBER_RE.fullmatch(member)
+                      ]
+                      if len(members) != 1:
+                          raise CandidateError(
+                              f"{wheel.name} holds {len(members)} top-level .dist-info/METADATA files, not 1"
+                          )
+                      text = archive.read(members[0]).decode("utf-8")
+              except (OSError, zipfile.BadZipFile, UnicodeDecodeError) as exc:
+                  raise CandidateError(f"cannot read the METADATA of {wheel.name}: {exc}") from None
+              headers = HeaderParser().parsestr(text)
+              name = (headers.get("Name") or "").strip()
+              version = (headers.get("Version") or "").strip()
+              if not name or not version:
+                  raise CandidateError(f"the METADATA of {wheel.name} lacks a Name or a Version")
+              if not is_valid_version(version):
+                  raise CandidateError(f"the METADATA of {wheel.name} holds a non-PEP 440 Version")
+              return name, version
+
+
+          def check_wheel_file_name(wheel: Path, name: str, version: str) -> None:
+              """Check that the wheel file name names the same distribution and version as its METADATA."""
+              parts = wheel.name[: -len(".whl")].split("-")
+              if len(parts) not in (5, 6):
+                  raise CandidateError(f"{wheel.name} is not a valid wheel file name")
+              file_name, file_version = parts[0], parts[1]
+              if normalize_name(file_name) != normalize_name(name):
+                  raise CandidateError(f"{wheel.name} does not name the distribution {name}")
+              if not is_valid_version(file_version) or not versions_equal(file_version, version):
+                  raise CandidateError(f"{wheel.name} does not name the version {version}")
+
+
+          def check_manifest(wheel_dir: Path, wheel: Path, name: str, version: str) -> None:
+              """Cross-check the <sdk>-manifest.json that the gate's build-wheel step writes beside the wheel."""
+              manifest = wheel_dir / f"{name}-manifest.json"
+              try:
+                  data = json.loads(manifest.read_text(encoding="utf-8"))
+              except FileNotFoundError:
+                  raise CandidateError(f"the artifact holds no {manifest.name}") from None
+              except (OSError, ValueError) as exc:
+                  raise CandidateError(f"cannot read {manifest.name}: {exc}") from None
+              if not isinstance(data, dict):
+                  raise CandidateError(f"{manifest.name} is not a JSON object")
+              sdk = data.get("sdk")
+              manifest_version = data.get("version")
+              wheel_filename = data.get("wheel_filename")
+              if not isinstance(sdk, str) or normalize_name(sdk) != normalize_name(name):
+                  raise CandidateError(f"{manifest.name} names another sdk than {name}")
+              if (
+                  not isinstance(manifest_version, str)
+                  or not is_valid_version(manifest_version)
+                  or not versions_equal(manifest_version, version)
+              ):
+                  raise CandidateError(f"{manifest.name} names another version than {version}")
+              if wheel_filename != wheel.name:
+                  raise CandidateError(f"{manifest.name} names another wheel file than {wheel.name}")
+
+
+          def find_installed(name: str, path: list[str] | None = None):
+              """Return the single installed distribution named name (PEP 503 normalized).
+
+              path defaults to sys.path, the import path of the running interpreter.
+              """
+              import importlib.metadata
+
+              wanted = normalize_name(name)
+              kwargs = {} if path is None else {"path": path}
+              found = {}
+              for dist in importlib.metadata.distributions(**kwargs):
+                  try:
+                      dist_name = dist.metadata.get("Name")
+                  except Exception:  # noqa: BLE001 - a broken distribution cannot be the candidate
+                      continue
+                  if not dist_name or normalize_name(dist_name) != wanted:
+                      continue
+                  # The same folder can sit on the import path twice; count each
+                  # .dist-info folder once. PathDistribution keeps it in _path.
+                  location = getattr(dist, "_path", None)
+                  key = os.path.realpath(str(location)) if location is not None else str(id(dist))
+                  found[key] = dist
+              if len(found) != 1:
+                  raise CandidateError(
+                      f"expected exactly one installed distribution of {name}, found {len(found)}"
+                  )
+              return next(iter(found.values()))
+
+
+          def check_direct_url(dist, name: str, wheel: Path) -> None:
+              """Require a direct_url.json that names the candidate wheel itself (PEP 610)."""
+              raw = dist.read_text("direct_url.json")
+              if raw is None:
+                  raise CandidateError(
+                      f"the installed {name} has no direct_url.json, so it was not installed from "
+                      "the candidate wheel (an install from an index or from uv.lock writes none)"
+                  )
+              try:
+                  data = json.loads(raw)
+              except ValueError:
+                  raise CandidateError(f"the direct_url.json of the installed {name} is not JSON") from None
+              url = data.get("url") if isinstance(data, dict) else None
+              if not isinstance(url, str):
+                  raise CandidateError(f"the direct_url.json of the installed {name} has no url")
+              parts = urlsplit(url)
+              if parts.scheme != "file" or parts.netloc not in ("", "localhost"):
+                  raise CandidateError(
+                      f"the installed {name} came from a {parts.scheme or 'schemeless'} URL, "
+                      "not from the candidate wheel"
+                  )
+              installed_from = os.path.realpath(url2pathname(parts.path))
+              if installed_from != os.path.realpath(str(wheel)):
+                  raise CandidateError(
+                      f"the installed {name} came from {Path(installed_from).name}, "
+                      f"not from the candidate wheel {wheel.name}"
+                  )
+
+
+          def verify_candidate(environ: dict[str, str], path: list[str] | None = None) -> str:
+              """Run the full assert and return the report line, or raise CandidateError."""
+              name, version, wheel_dir = read_expected(environ)
+              wheel = find_single_wheel(wheel_dir)
+              wheel_name, wheel_version = read_wheel_metadata(wheel)
+              if normalize_name(wheel_name) != normalize_name(name):
+                  raise CandidateError(f"the candidate wheel is {wheel_name}, not {name}")
+              if not versions_equal(wheel_version, version):
+                  raise CandidateError(
+                      f"the candidate wheel is {wheel_name} {wheel_version}, not version {version}"
+                  )
+              check_wheel_file_name(wheel, wheel_name, wheel_version)
+              check_manifest(wheel_dir, wheel, name, version)
+              dist = find_installed(name, path)
+              installed_version = dist.version
+              if not isinstance(installed_version, str) or not is_valid_version(installed_version):
+                  raise CandidateError(f"the installed {name} has no valid version")
+              if not versions_equal(installed_version, version):
+                  raise CandidateError(
+                      f"the installed {name} is {installed_version}, not the candidate {version}: "
+                      "the environment was synced away from the candidate (a plain `uv run` "
+                      "syncs to uv.lock)"
+                  )
+              check_direct_url(dist, name, wheel)
+              return f"consumer-gate: {dist.metadata.get('Name')}=={installed_version} {REPORT_SOURCE}"
+
+
+          def _command_text(message: str) -> str:
+              """Escape a message for a GitHub workflow command (one line, % escaped)."""
+              return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+          # --- pytest plugin (loaded with `pytest -p consumer_gate_candidate`) ------------
+
+          _REPORT_LINE: str | None = None
+
+
+          def pytest_configure(config) -> None:
+              """Refuse the whole session unless this interpreter holds the candidate."""
+              global _REPORT_LINE
+              try:
+                  _REPORT_LINE = verify_candidate(dict(os.environ))
+              except CandidateError as exc:
+                  from pytest import UsageError
+
+                  raise UsageError(f"consumer-gate: REFUSED: {exc}") from None
+
+
+          def pytest_report_header(config) -> list[str]:
+              """Print the candidate under test in pytest's header."""
+              return [_REPORT_LINE] if _REPORT_LINE else []
+
+
+          def pytest_terminal_summary(terminalreporter) -> None:
+              """Repeat the line at the end, where --no-header cannot hide it."""
+              if _REPORT_LINE:
+                  terminalreporter.write_line(_REPORT_LINE)
+
+
+          # --- command line -------------------------------------------------------------
+
+
+          def main(argv: list[str]) -> int:
+              """Run the guard or the verify command; return the exit code."""
+              environ = dict(os.environ)
+              if argv == ["guard"]:
+                  problems = check_guard_inputs(environ)
+                  if problems:
+                      for problem in problems:
+                          print(f"::error::consumer-gate inputs guard: {_command_text(problem)}")
+                      return 1
+                  print(
+                      "consumer-gate inputs guard: all four inputs set and well formed; "
+                      f"candidate {environ[ENV_NAME]}=={environ[ENV_VERSION]}"
+                  )
+                  return 0
+              if argv == ["verify"]:
+                  try:
+                      line = verify_candidate(environ)
+                  except CandidateError as exc:
+                      print(f"::error::consumer-gate: REFUSED: {_command_text(str(exc))}")
+                      return 1
+                  print(line)
+                  return 0
+              print("usage: consumer_gate_candidate.py guard|verify", file=sys.stderr)
+              return 2
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          CONSUMER_GATE_CANDIDATE_PY
+          python3 -I "${HELPER_DIR}/consumer_gate_candidate.py" guard
+          echo "mode=candidate" >> "$GITHUB_OUTPUT"
+
       - name: Fail shard when lint did not succeed
         if: needs.lint.result != 'success'
         run: |
@@ -984,7 +1928,7 @@ jobs:
       # see lint job for full rationale on the App-token auth path.
       - name: Generate App token for cross-repo artifact download (consumer-gate)
         id: cross-repo-app-token
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
         with:
           app-id: ${{ secrets.APP_ID }}
@@ -993,7 +1937,7 @@ jobs:
           repositories: autom8y
 
       - name: Download candidate SDK wheel (consumer-gate)
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
           name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
@@ -1003,7 +1947,7 @@ jobs:
           github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
-        if: inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         run: |
           set -euo pipefail
           ls -la _candidate-wheel/
@@ -1041,6 +1985,9 @@ jobs:
             | grep -ivE "^${CANDIDATE_PKG}(==| @|\[)" > _candidate-constraints.txt
           echo "candidate-constraints: $(wc -l < _candidate-constraints.txt) pinned requirements"
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
+          # S-126 (B1): see the lint-job block. A plain `uv run` would re-sync to
+          # uv.lock and replace this candidate before pytest imports it.
+          echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"
 
       - name: Build pytest arguments
         id: pytest-args
@@ -1114,17 +2061,43 @@ jobs:
       # table can be published as a per-shard artifact (FR-2, TDD §5.3).
       # `set -o pipefail` ensures a pytest failure is not masked by tee's
       # exit 0.
+      # S-126 (B2): on a candidate run both branches load the consumer-gate
+      # plugin with `-p` on the command line (never PYTEST_ADDOPTS, which a
+      # caller's test_env may set). Its pytest_configure fails the session with
+      # exit 4 unless this interpreter holds the candidate, and its report
+      # header prints "consumer-gate: <dist>==<version> source=candidate-wheel".
+      # In normal CI the array is empty and pytest's arguments are unchanged.
       - name: Run tests with coverage
         shell: bash
         env:
           TEST_SPLITS: ${{ inputs.test_splits }}
+          CONSUMER_GATE_MODE: ${{ steps.consumer-gate-guard.outputs.mode }}
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_DIR: ${{ github.workspace }}/_candidate-wheel
         run: |
           set -o pipefail
-          if [ "${TEST_SPLITS}" -gt 1 ]; then
-            uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }} 2>&1 | tee .pytest-shard-durations.txt
-          else
-            uv run --no-sources pytest ${{ steps.pytest-args.outputs.args }}
+          CONSUMER_GATE_PLUGIN=()
+          if [ "${CONSUMER_GATE_MODE}" = "candidate" ]; then
+            export PYTHONPATH="${RUNNER_TEMP}/consumer-gate${PYTHONPATH:+:${PYTHONPATH}}"
+            CONSUMER_GATE_PLUGIN=(-p consumer_gate_candidate)
           fi
+          if [ "${TEST_SPLITS}" -gt 1 ]; then
+            uv run --no-sources pytest "${CONSUMER_GATE_PLUGIN[@]}" ${{ steps.pytest-args.outputs.args }} 2>&1 | tee .pytest-shard-durations.txt
+          else
+            uv run --no-sources pytest "${CONSUMER_GATE_PLUGIN[@]}" ${{ steps.pytest-args.outputs.args }}
+          fi
+
+      # S-126 (B2): re-read the candidate after the last `uv run` of this job,
+      # with `uv run --no-sync` (a plain `uv run` would itself re-sync). Exit 1
+      # on any mismatch.
+      - name: Re-read candidate after the last uv run (consumer-gate)
+        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
+        env:
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_DIR: ${{ github.workspace }}/_candidate-wheel
+        run: uv run --no-sync --no-sources python -I "${RUNNER_TEMP}/consumer-gate/consumer_gate_candidate.py" verify
 
       # Aggregate coverage: upload the .coverage binary produced by this shard
       # so the coverage-aggregate job can combine all shards and enforce the

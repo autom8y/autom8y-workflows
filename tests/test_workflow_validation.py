@@ -6,16 +6,25 @@ Tests cover:
 3. Input completeness (all inputs have descriptions)
 4. Security hardening (persist-credentials: false, timeout-minutes set)
 5. Structural conventions (naming, permissions declared)
+6. Consumer-gate candidate coverage (S-126): every `uv run` after a candidate
+   force-install keeps the candidate, and the check runs where it must
 """
 
 from __future__ import annotations
 
+import copy
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+from tests._consumer_gate_support import EMBED_PATH, HELPER_PATH, load_module
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -756,3 +765,554 @@ class TestTemplateSecurityHardening:
             f"{path.name} writes token/secret to GITHUB_ENV without ::add-mask:::\n"
             + "\n".join(violations)
         )
+
+
+# ===========================================================================
+# 9. Consumer-gate candidate coverage (S-126)
+# ===========================================================================
+#
+# On a consumer-gate run the lint and test jobs force-install a candidate SDK
+# wheel. A plain `uv run` afterwards syncs the environment back to uv.lock and
+# replaces the candidate, while the run still succeeds. These checks fail when
+# any later step could do that unnoticed, or when the guard, the plugin or the
+# re-read is missing or misplaced.
+
+_SAT_CI_PATH = WORKFLOWS_DIR / "satellite-ci-reusable.yml"
+_CANDIDATE_JOBS = ("lint", "test")
+_LOCK_SOURCES_GUARD = "Require lock-sources success"
+_GUARD_ID = "consumer-gate-guard"
+_CANDIDATE_IF = "steps.consumer-gate-guard.outputs.mode == 'candidate'"
+_MODE_EXPR = "${{ steps.consumer-gate-guard.outputs.mode }}"
+_GUARD_ENV = {
+    "CONSUMER_GATE_SDK_NAME": "${{ inputs.candidate_sdk_name }}",
+    "CONSUMER_GATE_SDK_VERSION": "${{ inputs.candidate_sdk_version }}",
+    "CONSUMER_GATE_WHEEL_RUN_ID": "${{ inputs.candidate_wheel_run_id }}",
+    "CONSUMER_GATE_CORRELATION_ID": "${{ inputs.dispatch_correlation_id }}",
+}
+_CHECK_ENV = {
+    "CONSUMER_GATE_SDK_NAME": "${{ inputs.candidate_sdk_name }}",
+    "CONSUMER_GATE_SDK_VERSION": "${{ inputs.candidate_sdk_version }}",
+    "CONSUMER_GATE_WHEEL_DIR": "${{ github.workspace }}/_candidate-wheel",
+}
+_NO_SYNC_EXPORT = 'echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"'
+_UV_RUN_RE = re.compile(r"\buv\s+run\b")
+_PYTEST_RE = re.compile(r"\bpytest\b")
+_UV_ENV_WRITE_RE = re.compile(r"\buv\s+(?:sync|pip|add|remove)\b")
+_ALLOWED_UV_RUN_FLAGS = frozenset({"--no-sources", "--no-sync"})
+_ALLOWED_ACTIONS_AFTER_INSTALL = ("actions/upload-artifact@", "codecov/codecov-action@")
+_PLUGIN_ARRAY = '"${CONSUMER_GATE_PLUGIN[@]}"'
+_PLUGIN_DEFINITION = "CONSUMER_GATE_PLUGIN=(-p consumer_gate_candidate)"
+_VERIFY_COMMAND = (
+    'uv run --no-sync --no-sources python -I "${RUNNER_TEMP}/consumer-gate/consumer_gate_candidate.py" verify'
+)
+_INLINE_CANDIDATE_INPUT_RE = re.compile(
+    r"inputs\.(?:candidate_sdk_name|candidate_sdk_version|candidate_wheel_run_id|dispatch_correlation_id)"
+)
+
+
+def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    return [step for step in job.get("steps", []) if isinstance(step, dict)]
+
+
+def _code_lines(run: str) -> list[str]:
+    """A run script's lines without comment lines."""
+    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
+
+
+def _is_force_install(step: dict[str, Any]) -> bool:
+    run = str(step.get("run", ""))
+    return "--force-reinstall" in run and '"$CANDIDATE"' in run
+
+
+def _uv_run_flags(line: str) -> list[list[str]]:
+    """uv's own flags for each `uv run` on a line: the tokens before the command."""
+    found = []
+    for match in _UV_RUN_RE.finditer(line):
+        flags = []
+        for token in line[match.end():].split():
+            if not token.startswith("-"):
+                break
+            flags.append(token)
+        found.append(flags)
+    return found
+
+
+def _job_problems(job_name: str, job: dict[str, Any]) -> tuple[list[str], str | None]:
+    """The coverage problems of one candidate job, and its guard step's script."""
+    where = f"job {job_name}"
+    problems: list[str] = []
+    steps = _steps(job)
+    if "UV_NO_SYNC" in (job.get("env") or {}):
+        problems.append(f"{where}: job env sets UV_NO_SYNC")
+
+    # The lock-sources guard keeps the first step (B-2, tests/test_check_lock_sources.py);
+    # the inputs guard comes right after it, before every other step.
+    guard_run = None
+    guard = steps[1] if len(steps) > 1 else {}
+    if not steps or steps[0].get("name") != _LOCK_SOURCES_GUARD or guard.get("id") != _GUARD_ID:
+        problems.append(f"{where}: the consumer-gate inputs guard is not the step right after the lock-sources guard")
+    else:
+        guard_run = str(guard.get("run", ""))
+        if "if" in guard:
+            problems.append(f"{where}: the inputs guard has an if:, so it could be skipped")
+        if "continue-on-error" in guard:
+            problems.append(f"{where}: the inputs guard has continue-on-error")
+        if guard.get("env") != _GUARD_ENV:
+            problems.append(f"{where}: the inputs guard does not map exactly the four inputs")
+        if guard.get("shell") != "bash":
+            problems.append(f"{where}: the inputs guard does not set shell: bash")
+
+    for step in steps:
+        name = str(step.get("name", ""))
+        if "(consumer-gate)" in name and step.get("if") != _CANDIDATE_IF:
+            problems.append(f"{where}: step '{name}' does not run on {_CANDIDATE_IF}")
+
+    install_index = next(index for index, step in enumerate(steps) if _is_force_install(step))
+    install_lines = [line.strip() for line in _code_lines(str(steps[install_index].get("run", "")))]
+    pip_index = next(
+        (i for i, line in enumerate(install_lines) if line.startswith("uv pip install") and "--force-reinstall" in line),
+        None,
+    )
+    if pip_index is None or _NO_SYNC_EXPORT not in install_lines[pip_index + 1:]:
+        problems.append(f"{where}: the force-install does not export UV_NO_SYNC=1 to $GITHUB_ENV after installing")
+
+    last_uv_run = None
+    rereads = []
+    for index in range(install_index + 1, len(steps)):
+        step = steps[index]
+        label = f"{where}, step '{step.get('name', f'step-{index}')}'"
+        env = step.get("env") or {}
+        lines = _code_lines(str(step.get("run", "")))
+        code = "\n".join(lines)
+        if "UV_NO_SYNC" in env:
+            problems.append(f"{label}: env sets UV_NO_SYNC")
+        if "UV_NO_SYNC" in code:
+            problems.append(f"{label}: the script touches UV_NO_SYNC")
+        if _UV_ENV_WRITE_RE.search(code):
+            problems.append(f"{label}: changes the environment after the candidate install (uv sync, pip, add or remove)")
+        uses = str(step.get("uses", ""))
+        if uses and not uses.startswith(_ALLOWED_ACTIONS_AFTER_INSTALL):
+            problems.append(f"{label}: uses {uses.split('@')[0]}, which this check has not reviewed")
+        is_reread = _VERIFY_COMMAND in code
+        if is_reread:
+            rereads.append(index)
+            if env != _CHECK_ENV:
+                problems.append(f"{label}: the re-read does not get exactly the name, version and wheel folder")
+        for line in lines:
+            for flags in _uv_run_flags(line):
+                unknown = [flag for flag in flags if flag not in _ALLOWED_UV_RUN_FLAGS]
+                if unknown:
+                    problems.append(f"{label}: `uv run` with {unknown}, which this check does not cover")
+                if not is_reread:
+                    last_uv_run = index
+            if _UV_RUN_RE.search(line) and _PYTEST_RE.search(line) and _PLUGIN_ARRAY not in line:
+                problems.append(f"{label}: a pytest run without the consumer-gate plugin")
+        if _UV_RUN_RE.search(code) and _PYTEST_RE.search(code):
+            if _PLUGIN_DEFINITION not in code:
+                problems.append(f"{label}: does not load the plugin with -p on candidate runs")
+            if "PYTEST_ADDOPTS" in code:
+                problems.append(f"{label}: uses PYTEST_ADDOPTS; the plugin must be on the command line")
+            expected_env = dict(_CHECK_ENV, CONSUMER_GATE_MODE=_MODE_EXPR)
+            if any(env.get(key) != value for key, value in expected_env.items()):
+                problems.append(f"{label}: the pytest step does not get the mode, name, version and wheel folder")
+    if not rereads:
+        problems.append(f"{where}: no re-read of the candidate after the force-install")
+    elif last_uv_run is not None and max(rereads) < last_uv_run:
+        problems.append(f"{where}: the re-read runs before the last `uv run`")
+    return problems, guard_run
+
+
+def consumer_gate_coverage_problems(data: dict[str, Any]) -> list[str]:
+    """Every way satellite-ci-reusable.yml could let a candidate run test the lock instead."""
+    problems: list[str] = []
+    jobs = {name: job for name, job in data.get("jobs", {}).items() if isinstance(job, dict)}
+    if "UV_NO_SYNC" in (data.get("env") or {}):
+        problems.append("workflow env sets UV_NO_SYNC")
+    install_jobs = sorted(name for name, job in jobs.items() if any(_is_force_install(s) for s in _steps(job)))
+    if install_jobs != sorted(_CANDIDATE_JOBS):
+        problems.append(
+            f"jobs with a candidate force-install are {install_jobs}, not {sorted(_CANDIDATE_JOBS)}; "
+            "extend the consumer-gate check to cover a new one"
+        )
+    guard_runs = {}
+    for job_name in install_jobs:
+        job_problems, guard_run = _job_problems(job_name, jobs[job_name])
+        problems.extend(job_problems)
+        if guard_run is not None:
+            guard_runs[job_name] = guard_run
+    if len(set(guard_runs.values())) > 1:
+        problems.append("the inputs guard scripts of the candidate jobs differ")
+    for job_name, job in jobs.items():
+        for step in _steps(job):
+            if _INLINE_CANDIDATE_INPUT_RE.search(str(step.get("run", ""))):
+                problems.append(
+                    f"job {job_name}, step '{step.get('name', '')}': a candidate input is inline in run; pass it through env:"
+                )
+    return problems
+
+
+def _guard_step(data: dict[str, Any], job_name: str) -> dict[str, Any]:
+    return next(step for step in _steps(data["jobs"][job_name]) if step.get("id") == _GUARD_ID)
+
+
+def _step_named(data: dict[str, Any], job_name: str, name: str) -> dict[str, Any]:
+    return next(step for step in _steps(data["jobs"][job_name]) if step.get("name") == name)
+
+
+def _step_index(data: dict[str, Any], job_name: str, name: str) -> int:
+    return next(i for i, step in enumerate(_steps(data["jobs"][job_name])) if step.get("name") == name)
+
+
+class TestConsumerGateCoverage:
+    """S-126 B1 to B4: the structural half. The guard script runs in TestConsumerGateGuardScript."""
+
+    @pytest.fixture()
+    def sat_data(self) -> dict[str, Any]:
+        return _load_workflow(_SAT_CI_PATH)
+
+    def test_workflow_has_no_coverage_problems(self, sat_data: dict[str, Any]) -> None:
+        problems = consumer_gate_coverage_problems(sat_data)
+        assert not problems, "consumer-gate coverage problems:\n" + "\n".join(problems)
+
+    def test_embedded_helper_matches_the_canonical_file(self) -> None:
+        embed = load_module(EMBED_PATH, "embed_consumer_gate_candidate_under_test")
+        workflow_text = _SAT_CI_PATH.read_text(encoding="utf-8")
+        updated, copies = embed.embed(workflow_text, HELPER_PATH.read_text(encoding="utf-8"))
+        assert copies == 2
+        assert updated == workflow_text, (
+            "the helper embedded in satellite-ci-reusable.yml differs from "
+            ".github/scripts/consumer_gate_candidate.py; run "
+            "python3 .github/scripts/embed_consumer_gate_candidate.py"
+        )
+
+    @pytest.mark.parametrize("job_name", _CANDIDATE_JOBS)
+    def test_parsed_guard_writes_the_canonical_helper(self, sat_data: dict[str, Any], job_name: str) -> None:
+        """Read through YAML, the heredoc body is the canonical file byte for byte."""
+        run = str(_guard_step(sat_data, job_name)["run"])
+        opener = "<<'CONSUMER_GATE_CANDIDATE_PY'\n"
+        body = run.split(opener, 1)[1].split("\nCONSUMER_GATE_CANDIDATE_PY\n", 1)[0] + "\n"
+        assert body == HELPER_PATH.read_text(encoding="utf-8")
+        assert "${{" not in body
+
+    # --- each rule bites: a mutation of the real workflow must be reported ---
+
+    @staticmethod
+    def _problems_after(sat_data: dict[str, Any], mutate: Any) -> list[str]:
+        mutated = copy.deepcopy(sat_data)
+        mutate(mutated)
+        return consumer_gate_coverage_problems(mutated)
+
+    @pytest.mark.parametrize("job_name", _CANDIDATE_JOBS)
+    def test_bites_when_the_no_sync_export_is_removed(self, sat_data: dict[str, Any], job_name: str) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = next(s for s in _steps(data["jobs"][job_name]) if _is_force_install(s))
+            step["run"] = step["run"].replace(_NO_SYNC_EXPORT, "")
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any(f"job {job_name}" in p and "UV_NO_SYNC=1" in p for p in problems), problems
+
+    def test_bites_on_an_uncovered_uv_run_flag(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            index = _step_index(data, "lint", "Check formatting")
+            data["jobs"]["lint"]["steps"].insert(index, {"name": "Smoke", "run": "uv run --isolated python -c 1"})
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("Smoke" in p and "--isolated" in p for p in problems), problems
+
+    def test_bites_on_a_sync_after_the_install(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            index = _step_index(data, "test", "Build pytest arguments")
+            data["jobs"]["test"]["steps"].insert(index, {"name": "Resync", "run": "uv sync --no-sources"})
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("Resync" in p and "changes the environment" in p for p in problems), problems
+
+    @pytest.mark.parametrize("where", ["env", "run"])
+    def test_bites_when_a_later_step_overrides_uv_no_sync(self, sat_data: dict[str, Any], where: str) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "lint", "Type check (strict)")
+            if where == "env":
+                step["env"] = {"UV_NO_SYNC": ""}
+            else:
+                step["run"] = "unset UV_NO_SYNC\n" + step["run"]
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("Type check (strict)" in p and "UV_NO_SYNC" in p for p in problems), problems
+
+    def test_bites_on_job_level_uv_no_sync(self, sat_data: dict[str, Any]) -> None:
+        problems = self._problems_after(sat_data, lambda d: d["jobs"]["test"].update(env={"UV_NO_SYNC": "0"}))
+        assert any("job test: job env sets UV_NO_SYNC" in p for p in problems), problems
+
+    def test_bites_on_an_unreviewed_action_after_the_install(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            index = _step_index(data, "test", "Run tests with coverage")
+            data["jobs"]["test"]["steps"].insert(index, {"name": "Local action", "uses": "./.github/actions/setup"})
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("Local action" in p and "not reviewed" in p for p in problems), problems
+
+    @pytest.mark.parametrize("branch", [0, 1])
+    def test_bites_when_a_pytest_branch_drops_the_plugin(self, sat_data: dict[str, Any], branch: int) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "test", "Run tests with coverage")
+            lines = step["run"].split("\n")
+            pytest_lines = [i for i, line in enumerate(lines) if "uv run" in line and "pytest" in line]
+            lines[pytest_lines[branch]] = lines[pytest_lines[branch]].replace(_PLUGIN_ARRAY + " ", "")
+            step["run"] = "\n".join(lines)
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("without the consumer-gate plugin" in p for p in problems), problems
+
+    def test_bites_when_the_plugin_moves_to_pytest_addopts(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "test", "Run tests with coverage")
+            step["run"] = step["run"].replace(
+                _PLUGIN_DEFINITION, 'export PYTEST_ADDOPTS="-p consumer_gate_candidate"'
+            )
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("does not load the plugin" in p for p in problems), problems
+        assert any("PYTEST_ADDOPTS" in p for p in problems), problems
+
+    @pytest.mark.parametrize("job_name", _CANDIDATE_JOBS)
+    def test_bites_when_the_re_read_is_missing(self, sat_data: dict[str, Any], job_name: str) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            steps = data["jobs"][job_name]["steps"]
+            steps[:] = [s for s in steps if s.get("name") != "Re-read candidate after the last uv run (consumer-gate)"]
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any(f"job {job_name}: no re-read" in p for p in problems), problems
+
+    def test_bites_when_the_re_read_runs_before_the_last_uv_run(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            steps = data["jobs"]["lint"]["steps"]
+            reread = next(s for s in steps if s.get("name") == "Re-read candidate after the last uv run (consumer-gate)")
+            steps.remove(reread)
+            steps.insert(_step_index(data, "lint", "Check formatting"), reread)
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("re-read runs before the last `uv run`" in p for p in problems), problems
+
+    def test_bites_when_the_re_read_uses_a_plain_uv_run(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "test", "Re-read candidate after the last uv run (consumer-gate)")
+            step["run"] = step["run"].replace("uv run --no-sync --no-sources", "uv run --no-sources")
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("job test: no re-read" in p for p in problems), problems
+
+    @pytest.mark.parametrize(
+        "mutation,message",
+        [
+            (lambda step: step.update({"if": "always()"}), "has an if:"),
+            (lambda step: step.update({"continue-on-error": True}), "continue-on-error"),
+            (lambda step: step["env"].pop("CONSUMER_GATE_CORRELATION_ID"), "exactly the four inputs"),
+            (lambda step: step.pop("shell"), "shell: bash"),
+        ],
+    )
+    def test_bites_on_a_weakened_guard(self, sat_data: dict[str, Any], mutation: Any, message: str) -> None:
+        problems = self._problems_after(sat_data, lambda d: mutation(_guard_step(d, "test")))
+        assert any("job test" in p and message in p for p in problems), problems
+
+    @pytest.mark.parametrize("swap", [(0, 1), (1, 2)], ids=["before-lock-sources", "after-checkout"])
+    def test_bites_when_the_guard_moves(self, sat_data: dict[str, Any], swap: tuple[int, int]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            steps = data["jobs"]["lint"]["steps"]
+            first, second = swap
+            steps[first], steps[second] = steps[second], steps[first]
+
+        problems = self._problems_after(sat_data, mutate)
+        expected = "job lint: the consumer-gate inputs guard is not the step right after the lock-sources guard"
+        assert expected in problems, problems
+
+    def test_bites_when_the_guard_scripts_differ(self, sat_data: dict[str, Any]) -> None:
+        problems = self._problems_after(
+            sat_data, lambda d: _guard_step(d, "lint").update(run=_guard_step(d, "lint")["run"] + "true\n")
+        )
+        assert "the inputs guard scripts of the candidate jobs differ" in problems
+
+    def test_bites_when_a_candidate_step_keeps_the_old_condition(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "test", "Force-install candidate SDK wheel (consumer-gate)")
+            step["if"] = "inputs.candidate_wheel_run_id != '' && inputs.candidate_sdk_name != ''"
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("Force-install candidate SDK wheel" in p and "does not run on" in p for p in problems), problems
+
+    def test_bites_on_an_inline_candidate_input(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "lint", "Check formatting")
+            step["run"] = 'echo "${{ inputs.candidate_sdk_version }}"\n' + step["run"]
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("inline in run" in p for p in problems), problems
+
+    def test_bites_on_a_new_job_with_a_force_install(self, sat_data: dict[str, Any]) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            data["jobs"]["extra"] = copy.deepcopy(data["jobs"]["lint"])
+
+        problems = self._problems_after(sat_data, mutate)
+        assert any("extend the consumer-gate check" in p for p in problems), problems
+
+
+# --- the step scripts themselves, run with bash ------------------------------
+
+
+def _bash() -> str:
+    found = shutil.which("bash")
+    if found is None:
+        pytest.skip("bash is not on PATH")
+    return found
+
+
+def _shim_dir(tmp_path: Path, python3_works: bool) -> Path:
+    """A bin folder whose python3 is this interpreter, or one that exits 97."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "python3"
+    if python3_works:
+        shim.symlink_to(sys.executable)
+    else:
+        shim.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        shim.chmod(0o755)
+    return bin_dir
+
+
+def _run_guard(
+    tmp_path: Path, values: dict[str, str], *, python3_works: bool = True
+) -> tuple[int, str, Path]:
+    data = _load_workflow(_SAT_CI_PATH)
+    script = str(_guard_step(data, "lint")["run"])
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    output = tmp_path / "github-output"
+    output.write_text("", encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CONSUMER_GATE_")}
+    env.update({key: "" for key in _GUARD_ENV})
+    env.update(values)
+    env.update(
+        GITHUB_OUTPUT=str(output),
+        RUNNER_TEMP=str(runner_temp),
+        PATH=os.pathsep.join([str(_shim_dir(tmp_path, python3_works)), env.get("PATH", "")]),
+    )
+    result = subprocess.run(
+        [_bash(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, output.read_text(encoding="utf-8"), runner_temp
+
+
+_SET_INPUTS = {
+    "CONSUMER_GATE_SDK_NAME": "autom8y-auth",
+    "CONSUMER_GATE_SDK_VERSION": "4.4.1",
+    "CONSUMER_GATE_WHEEL_RUN_ID": "1234567",
+    "CONSUMER_GATE_CORRELATION_ID": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+}
+
+
+class TestConsumerGateGuardScript:
+    """S-126 B4: the guard step's script, exactly as the workflow holds it, run with bash."""
+
+    def test_all_empty_is_normal_ci_and_calls_no_python(self, tmp_path: Path) -> None:
+        # python3 here exits 97, so a guard that called Python in normal CI would fail.
+        code, output, runner_temp = _run_guard(tmp_path, {}, python3_works=False)
+        assert code == 0
+        assert output == "mode=none\n"
+        assert not (runner_temp / "consumer-gate").exists()
+
+    def test_whitespace_only_counts_as_empty(self, tmp_path: Path) -> None:
+        values = {key: " \t" for key in _SET_INPUTS}
+        code, output, _ = _run_guard(tmp_path, values, python3_works=False)
+        assert (code, output) == (0, "mode=none\n")
+
+    @pytest.mark.parametrize("set_keys", [
+        ("CONSUMER_GATE_SDK_NAME",),
+        ("CONSUMER_GATE_SDK_NAME", "CONSUMER_GATE_WHEEL_RUN_ID"),
+        ("CONSUMER_GATE_SDK_NAME", "CONSUMER_GATE_SDK_VERSION", "CONSUMER_GATE_WHEEL_RUN_ID"),
+        ("CONSUMER_GATE_CORRELATION_ID",),
+    ])
+    def test_partial_inputs_fail(self, tmp_path: Path, set_keys: tuple[str, ...]) -> None:
+        code, output, _ = _run_guard(tmp_path, {key: _SET_INPUTS[key] for key in set_keys})
+        assert code == 1
+        assert "mode=" not in output
+
+    def test_three_set_and_one_whitespace_fails(self, tmp_path: Path) -> None:
+        code, output, _ = _run_guard(tmp_path, dict(_SET_INPUTS, CONSUMER_GATE_CORRELATION_ID="  "))
+        assert code == 1
+        assert "mode=" not in output
+
+    def test_all_four_set_is_candidate_mode_and_writes_the_helper(self, tmp_path: Path) -> None:
+        code, output, runner_temp = _run_guard(tmp_path, dict(_SET_INPUTS))
+        assert code == 0
+        assert output == "mode=candidate\n"
+        written = runner_temp / "consumer-gate" / "consumer_gate_candidate.py"
+        assert written.read_text(encoding="utf-8") == HELPER_PATH.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("key,value", [
+        ("CONSUMER_GATE_WHEEL_RUN_ID", "run-1"),
+        ("CONSUMER_GATE_SDK_VERSION", "latest"),
+        ("CONSUMER_GATE_SDK_NAME", "autom8y auth"),
+    ])
+    def test_all_set_but_malformed_fails(self, tmp_path: Path, key: str, value: str) -> None:
+        code, output, _ = _run_guard(tmp_path, dict(_SET_INPUTS, **{key: value}))
+        assert code == 1
+        assert "mode=" not in output
+
+
+def _pytest_step_argv(tmp_path: Path, mode: str, splits: str) -> tuple[list[str], str]:
+    """Run the test job's pytest step with a stub uv; return uv's argv and its PYTHONPATH."""
+    data = _load_workflow(_SAT_CI_PATH)
+    script = str(_step_named(data, "test", "Run tests with coverage")["run"])
+    args = "tests/ -m 'not integration' -v --cov=pkg"
+    script = script.replace("${{ steps.pytest-args.outputs.args }}", args)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "uv"
+    stub.write_text(
+        '#!/bin/sh\nfor arg in "$@"; do printf \'%s\\n\' "$arg"; done > "$STUB_ARGV"\n'
+        'printf \'%s\' "${PYTHONPATH:-}" > "$STUB_PYTHONPATH"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    argv_file = tmp_path / "argv"
+    pythonpath_file = tmp_path / "pythonpath"
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env.update(
+        PATH=os.pathsep.join([str(bin_dir), env.get("PATH", "")]),
+        TEST_SPLITS=splits,
+        CONSUMER_GATE_MODE=mode,
+        RUNNER_TEMP="/runner-temp",
+        STUB_ARGV=str(argv_file),
+        STUB_PYTHONPATH=str(pythonpath_file),
+    )
+    result = subprocess.run(
+        [_bash(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return argv_file.read_text(encoding="utf-8").splitlines(), pythonpath_file.read_text(encoding="utf-8")
+
+
+class TestConsumerGatePytestStep:
+    """S-126 B2 and the normal-CI promise: pytest's arguments change only on candidate runs."""
+
+    _BASE = ["run", "--no-sources", "pytest", "tests/", "-m", "not integration", "-v", "--cov=pkg"]
+
+    @pytest.mark.parametrize("splits", ["1", "2"])
+    def test_normal_ci_argv_and_pythonpath_are_unchanged(self, tmp_path: Path, splits: str) -> None:
+        argv, pythonpath = _pytest_step_argv(tmp_path, "none", splits)
+        assert argv == self._BASE
+        assert pythonpath == ""
+
+    @pytest.mark.parametrize("splits", ["1", "2"])
+    def test_candidate_run_loads_the_plugin_on_the_command_line(self, tmp_path: Path, splits: str) -> None:
+        argv, pythonpath = _pytest_step_argv(tmp_path, "candidate", splits)
+        assert argv == self._BASE[:3] + ["-p", "consumer_gate_candidate"] + self._BASE[3:]
+        assert pythonpath == "/runner-temp/consumer-gate"

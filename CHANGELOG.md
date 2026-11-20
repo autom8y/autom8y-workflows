@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Consumer gate tests the candidate, and proves it** (S-126). On a consumer-gate run, a
+  plain `uv run` re-synced the environment to the satellite's `uv.lock` after the candidate
+  force-install, so lint and tests could run against the locked SDK version and still pass.
+  `satellite-ci-reusable.yml` now sets `UV_NO_SYNC=1` after both force-installs, loads an
+  in-process pytest plugin (`-p consumer_gate_candidate`) in both pytest branches, and re-reads
+  the candidate after the last `uv run` of the lint and test jobs. The check
+  (`.github/scripts/consumer_gate_candidate.py`) requires the wheel's METADATA name and version
+  (PEP 503, PEP 440), exactly one wheel, the gate's `<sdk>-manifest.json`, and a
+  `direct_url.json` that names the candidate wheel; any mismatch fails the job. A new inputs
+  guard fails a run that sets only some of the four candidate inputs. Normal CI (no inputs)
+  is unchanged. Satellites take it with the usual two-line pin bump.
+
 ### Documented
 - **Opt-out from fleet env/secret platformization initiative** (FLEET-workflows, Wave 3).
   `autom8y-workflows` has no runtime env surface: no `.envrc`, no `.env/` dir, no

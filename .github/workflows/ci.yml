@@ -110,3 +110,28 @@ jobs:
       # PyYAML cannot change what is skipped); -B writes no bytecode into the checkout.
       - name: Run tests
         run: python3 -B -S -m unittest -v tests.test_check_lock_sources
+
+  consumer-gate-check-tests:
+    name: Consumer-gate check tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+        with:
+          persist-credentials: false
+
+      # S-126: the consumer-gate helper's unit tests and the satellite workflow's
+      # coverage check (every `uv run` after a candidate install keeps the
+      # candidate). No uv is needed; the uv end-to-end proof,
+      # tests/test_consumer_gate_uv_offline.py, is opt-in and runs offline locally.
+      - name: Run tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==8.4.2 pyyaml==6.0.2
+          "$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider \
+            tests/test_consumer_gate_candidate.py \
+            tests/test_workflow_validation.py::TestConsumerGateCoverage \
+            tests/test_workflow_validation.py::TestConsumerGateGuardScript \
+            tests/test_workflow_validation.py::TestConsumerGatePytestStep
