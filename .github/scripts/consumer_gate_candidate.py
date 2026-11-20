@@ -354,7 +354,12 @@ def verify_candidate(environ: dict[str, str], path: list[str] | None = None) -> 
 
 
 def _command_text(message: str) -> str:
-    """Escape a message for a GitHub workflow command (one line, % escaped)."""
+    """Escape text for the runner's log: one line, with % escaped as in a workflow command.
+
+    Every line this module prints goes through here. Messages can carry text
+    from the wheel (a folded METADATA Name holds a newline), and a line that
+    starts with :: is read by the runner as a workflow command.
+    """
     return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
@@ -367,11 +372,11 @@ def pytest_configure(config) -> None:
     """Refuse the whole session unless this interpreter holds the candidate."""
     global _REPORT_LINE
     try:
-        _REPORT_LINE = verify_candidate(dict(os.environ))
+        _REPORT_LINE = _command_text(verify_candidate(dict(os.environ)))
     except CandidateError as exc:
         from pytest import UsageError
 
-        raise UsageError(f"consumer-gate: REFUSED: {exc}") from None
+        raise UsageError(_command_text(f"consumer-gate: REFUSED: {exc}")) from None
 
 
 def pytest_report_header(config) -> list[str]:
@@ -398,8 +403,10 @@ def main(argv: list[str]) -> int:
                 print(f"::error::consumer-gate inputs guard: {_command_text(problem)}")
             return 1
         print(
-            "consumer-gate inputs guard: all four inputs set and well formed; "
-            f"candidate {environ[ENV_NAME]}=={environ[ENV_VERSION]}"
+            _command_text(
+                "consumer-gate inputs guard: all four inputs set and well formed; "
+                f"candidate {environ[ENV_NAME]}=={environ[ENV_VERSION]}"
+            )
         )
         return 0
     if argv == ["verify"]:
@@ -408,7 +415,7 @@ def main(argv: list[str]) -> int:
         except CandidateError as exc:
             print(f"::error::consumer-gate: REFUSED: {_command_text(str(exc))}")
             return 1
-        print(line)
+        print(_command_text(line))
         return 0
     print("usage: consumer_gate_candidate.py guard|verify", file=sys.stderr)
     return 2

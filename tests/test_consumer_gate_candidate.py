@@ -469,3 +469,64 @@ def test_plugin_refuses_with_usage_error(lab: Lab, tmp_path: Path) -> None:
     assert result.returncode == 4, result.stdout + result.stderr
     assert "consumer-gate: REFUSED:" in result.stderr
     assert "passed" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# R1: text from the wheel cannot print a workflow command
+# ---------------------------------------------------------------------------
+
+PLANT = "planted-by-a-folded-name"
+FOLDED_NAMES = [f"{NAME}\n ::error::{PLANT}", f"{NAME}\r\n\t::warning::{PLANT}"]
+
+
+@pytest.fixture(params=FOLDED_NAMES, ids=["lf-space", "crlf-tab"])
+def folded_lab(request: pytest.FixtureRequest, tmp_path: Path) -> Lab:
+    """A candidate wheel whose METADATA Name is a folded header carrying a `::` command line."""
+    wheel_dir = tmp_path / "_candidate-wheel"
+    wheel = build_wheel(wheel_dir, NAME, CANDIDATE, metadata_name=request.param)
+    write_manifest(wheel_dir, NAME, CANDIDATE, wheel.name)
+    site = tmp_path / "site"
+    install_fake_dist(site, NAME, CANDIDATE, direct_url=direct_url_for(wheel))
+    return Lab(wheel_dir=wheel_dir, wheel=wheel, site=site)
+
+
+def _command_lines(text: str) -> list[str]:
+    """The lines the runner would read as workflow commands."""
+    return [line for line in text.splitlines() if line.lstrip().startswith("::")]
+
+
+def _verify_command(lab: Lab, tmp_path: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(HELPER_PATH), "verify"],
+        env=_clean_env(PYTHONPATH=str(lab.site), **lab.environ(**overrides)),
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+
+
+def test_folded_name_plant_took(folded_lab: Lab) -> None:
+    """Unescaped, the refusal really would carry a command line; otherwise the tests below prove nothing."""
+    name, _ = cg.read_wheel_metadata(folded_lab.wheel)
+    assert PLANT in name and ("\n" in name or "\r" in name)
+    with pytest.raises(cg.CandidateError) as caught:
+        folded_lab.verify()
+    assert any(PLANT in line for line in _command_lines(str(caught.value)))
+
+
+def test_plugin_escapes_a_folded_name(folded_lab: Lab, tmp_path: Path) -> None:
+    result = _plugin_run(folded_lab, tmp_path)
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert PLANT in result.stderr and "%0A" in result.stderr
+    assert _command_lines(result.stdout + "\n" + result.stderr) == []
+
+
+def test_verify_command_escapes_a_folded_name(folded_lab: Lab, tmp_path: Path) -> None:
+    result = _verify_command(folded_lab, tmp_path)
+    assert result.returncode == 1
+    assert PLANT in result.stdout and "%0A" in result.stdout
+    # The one intended ::error:: line, and nothing else the runner reads as a command.
+    assert _command_lines(result.stdout) == [result.stdout.strip()]
+    assert result.stdout.startswith("::error::consumer-gate: REFUSED:")
+    assert _command_lines(result.stderr) == []

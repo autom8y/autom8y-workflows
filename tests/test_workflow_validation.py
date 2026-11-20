@@ -780,6 +780,9 @@ class TestTemplateSecurityHardening:
 _SAT_CI_PATH = WORKFLOWS_DIR / "satellite-ci-reusable.yml"
 _CANDIDATE_JOBS = ("lint", "test")
 _LOCK_SOURCES_GUARD = "Require lock-sources success"
+_INSTALL_STEP = "Force-install candidate SDK wheel (consumer-gate)"
+_PYTEST_STEP = "Run tests with coverage"
+_REREAD_STEP = "Re-read candidate after the last uv run (consumer-gate)"
 _GUARD_ID = "consumer-gate-guard"
 _CANDIDATE_IF = "steps.consumer-gate-guard.outputs.mode == 'candidate'"
 _MODE_EXPR = "${{ steps.consumer-gate-guard.outputs.mode }}"
@@ -797,7 +800,9 @@ _CHECK_ENV = {
 _NO_SYNC_EXPORT = 'echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"'
 _UV_RUN_RE = re.compile(r"\buv\s+run\b")
 _PYTEST_RE = re.compile(r"\bpytest\b")
-_UV_ENV_WRITE_RE = re.compile(r"\buv\s+(?:sync|pip|add|remove)\b")
+_UV_ENV_WRITE_RE = re.compile(r"\buv\s+(?:sync|pip|add|remove|venv)\b")
+# Plain pip, bare or by path (".../bin/pip" install) or as `python -m pip`.
+_PIP_WRITE_RE = re.compile(r"\bpip3?[\"']?\s+(?:install|uninstall|sync)\b")
 _ALLOWED_UV_RUN_FLAGS = frozenset({"--no-sources", "--no-sync"})
 _ALLOWED_ACTIONS_AFTER_INSTALL = ("actions/upload-artifact@", "codecov/codecov-action@")
 _PLUGIN_ARRAY = '"${CONSUMER_GATE_PLUGIN[@]}"'
@@ -815,8 +820,30 @@ def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _code_lines(run: str) -> list[str]:
-    """A run script's lines without comment lines."""
-    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
+    """A run script's logical lines: comment lines dropped, backslash continuations joined.
+
+    Joining matters: `uv run \\` followed by `--isolated pytest` on the next
+    line must be read as one command, or its flags escape the check.
+    """
+    lines: list[str] = []
+    pending = ""
+    for line in run.splitlines():
+        if not pending and line.lstrip().startswith("#"):
+            continue
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            pending += stripped[:-1] + " "
+            continue
+        lines.append(pending + line)
+        pending = ""
+    if pending:
+        lines.append(pending)
+    return lines
+
+
+def _is_reread(code: str) -> bool:
+    """A re-read step's whole script is exactly the verify command: nothing may follow it."""
+    return " ".join(code.split()) == _VERIFY_COMMAND
 
 
 def _is_force_install(step: dict[str, Any]) -> bool:
@@ -866,6 +893,8 @@ def _job_problems(job_name: str, job: dict[str, Any]) -> tuple[list[str], str | 
         name = str(step.get("name", ""))
         if "(consumer-gate)" in name and step.get("if") != _CANDIDATE_IF:
             problems.append(f"{where}: step '{name}' does not run on {_CANDIDATE_IF}")
+        if "(consumer-gate)" in name and "continue-on-error" in step:
+            problems.append(f"{where}: step '{name}' has continue-on-error, so its failure would not fail the job")
 
     install_index = next(index for index, step in enumerate(steps) if _is_force_install(step))
     install_lines = [line.strip() for line in _code_lines(str(steps[install_index].get("run", "")))]
@@ -888,16 +917,23 @@ def _job_problems(job_name: str, job: dict[str, Any]) -> tuple[list[str], str | 
             problems.append(f"{label}: env sets UV_NO_SYNC")
         if "UV_NO_SYNC" in code:
             problems.append(f"{label}: the script touches UV_NO_SYNC")
-        if _UV_ENV_WRITE_RE.search(code):
-            problems.append(f"{label}: changes the environment after the candidate install (uv sync, pip, add or remove)")
+        if _UV_ENV_WRITE_RE.search(code) or _PIP_WRITE_RE.search(code):
+            problems.append(
+                f"{label}: changes the environment after the candidate install "
+                "(uv sync, uv pip, uv add, uv remove, uv venv or pip)"
+            )
         uses = str(step.get("uses", ""))
         if uses and not uses.startswith(_ALLOWED_ACTIONS_AFTER_INSTALL):
             problems.append(f"{label}: uses {uses.split('@')[0]}, which this check has not reviewed")
-        is_reread = _VERIFY_COMMAND in code
+        is_reread = _is_reread(code)
         if is_reread:
             rereads.append(index)
             if env != _CHECK_ENV:
                 problems.append(f"{label}: the re-read does not get exactly the name, version and wheel folder")
+            if step.get("if") != _CANDIDATE_IF:
+                problems.append(f"{label}: the re-read does not run on {_CANDIDATE_IF}")
+            if "continue-on-error" in step:
+                problems.append(f"{label}: the re-read has continue-on-error, so its failure would not fail the job")
         for line in lines:
             for flags in _uv_run_flags(line):
                 unknown = [flag for flag in flags if flag not in _ALLOWED_UV_RUN_FLAGS]
@@ -908,6 +944,10 @@ def _job_problems(job_name: str, job: dict[str, Any]) -> tuple[list[str], str | 
             if _UV_RUN_RE.search(line) and _PYTEST_RE.search(line) and _PLUGIN_ARRAY not in line:
                 problems.append(f"{label}: a pytest run without the consumer-gate plugin")
         if _UV_RUN_RE.search(code) and _PYTEST_RE.search(code):
+            if "if" in step:
+                problems.append(f"{label}: the pytest step has an if:, so a candidate run could skip its tests")
+            if "continue-on-error" in step:
+                problems.append(f"{label}: the pytest step has continue-on-error, so a failure would not fail the job")
             if _PLUGIN_DEFINITION not in code:
                 problems.append(f"{label}: does not load the plugin with -p on candidate runs")
             if "PYTEST_ADDOPTS" in code:
@@ -1153,6 +1193,109 @@ class TestConsumerGateCoverage:
 
         problems = self._problems_after(sat_data, mutate)
         assert any("extend the consumer-gate check" in p for p in problems), problems
+
+    # --- R3: five more mutants. Each first asserts that its plant took. ---
+
+    @staticmethod
+    def _mutated(sat_data: dict[str, Any], mutate: Any) -> tuple[dict[str, Any], list[str]]:
+        mutated = copy.deepcopy(sat_data)
+        mutate(mutated)
+        return mutated, consumer_gate_coverage_problems(mutated)
+
+    @pytest.mark.parametrize("job_name", _CANDIDATE_JOBS)
+    @pytest.mark.parametrize("tail", [" || true", "; true", " || exit 0"])
+    def test_bites_when_the_re_read_swallows_its_exit(
+        self, sat_data: dict[str, Any], job_name: str, tail: str
+    ) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, job_name, _REREAD_STEP)
+            step["run"] = step["run"] + tail
+
+        mutated, problems = self._mutated(sat_data, mutate)
+        assert _step_named(mutated, job_name, _REREAD_STEP)["run"].endswith(tail)
+        assert any(f"job {job_name}: no re-read" in p for p in problems), problems
+
+    @pytest.mark.parametrize(
+        "job_name,step_name",
+        [
+            ("lint", _INSTALL_STEP),
+            ("test", _INSTALL_STEP),
+            ("test", _PYTEST_STEP),
+            ("lint", _REREAD_STEP),
+            ("test", _REREAD_STEP),
+        ],
+    )
+    def test_bites_on_continue_on_error(self, sat_data: dict[str, Any], job_name: str, step_name: str) -> None:
+        mutated, problems = self._mutated(
+            sat_data, lambda d: _step_named(d, job_name, step_name).update({"continue-on-error": True})
+        )
+        assert _step_named(mutated, job_name, step_name)["continue-on-error"] is True
+        assert any(step_name in p and "continue-on-error" in p for p in problems), problems
+
+    @pytest.mark.parametrize(
+        "condition", ["always()", "inputs.test_splits > 0", "steps.consumer-gate-guard.outputs.mode != 'candidate'"]
+    )
+    def test_bites_on_an_if_on_the_pytest_step(self, sat_data: dict[str, Any], condition: str) -> None:
+        mutated, problems = self._mutated(
+            sat_data, lambda d: _step_named(d, "test", _PYTEST_STEP).update({"if": condition})
+        )
+        assert _step_named(mutated, "test", _PYTEST_STEP)["if"] == condition
+        assert any(_PYTEST_STEP in p and "has an if:" in p for p in problems), problems
+
+    @pytest.mark.parametrize(
+        "job_name,script",
+        [
+            ("lint", "uv venv --clear .venv"),
+            ("test", "uv venv"),
+            ("lint", "pip install dummy-sdk==1.0.0"),
+            ("test", "python -m pip install --force-reinstall dummy-sdk==1.0.0"),
+            ("test", '"$RUNNER_TEMP/venv/bin/pip" install dummy-sdk==1.0.0'),
+            ("lint", "pip3 uninstall -y dummy-sdk"),
+        ],
+    )
+    def test_bites_on_uv_venv_and_plain_pip(self, sat_data: dict[str, Any], job_name: str, script: str) -> None:
+        anchor = "Check formatting" if job_name == "lint" else _PYTEST_STEP
+
+        def mutate(data: dict[str, Any]) -> None:
+            data["jobs"][job_name]["steps"].insert(
+                _step_index(data, job_name, anchor), {"name": "Planted", "run": script}
+            )
+
+        mutated, problems = self._mutated(sat_data, mutate)
+        assert _step_named(mutated, job_name, "Planted")["run"] == script
+        assert _step_index(mutated, job_name, "Planted") > _step_index(mutated, job_name, _INSTALL_STEP)
+        assert any("Planted" in p and "changes the environment" in p for p in problems), problems
+
+    @pytest.mark.parametrize(
+        "job_name,step_name,old,new",
+        [
+            ("lint", "Check formatting", "uv run --no-sources ruff", "uv run \\\n  --with ruff --no-sources ruff"),
+            ("test", _PYTEST_STEP, "uv run --no-sources pytest", "uv run \\\n    --isolated --no-sources pytest"),
+            ("test", _PYTEST_STEP, "uv run --no-sources pytest", "uv run --no-sources \\\n    --python 3.13 pytest"),
+        ],
+    )
+    def test_bites_on_flags_after_a_line_continuation(
+        self, sat_data: dict[str, Any], job_name: str, step_name: str, old: str, new: str
+    ) -> None:
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, job_name, step_name)
+            step["run"] = step["run"].replace(old, new, 1)
+
+        mutated, problems = self._mutated(sat_data, mutate)
+        assert new in _step_named(mutated, job_name, step_name)["run"]
+        assert any(step_name in p and "which this check does not cover" in p for p in problems), problems
+
+    def test_a_clean_line_continuation_is_not_a_problem(self, sat_data: dict[str, Any]) -> None:
+        """The other side: a continuation with only covered flags passes, and keeps the plugin."""
+        new = "uv run \\\n    --no-sources pytest"
+
+        def mutate(data: dict[str, Any]) -> None:
+            step = _step_named(data, "test", _PYTEST_STEP)
+            step["run"] = step["run"].replace("uv run --no-sources pytest", new)
+
+        mutated, problems = self._mutated(sat_data, mutate)
+        assert _step_named(mutated, "test", _PYTEST_STEP)["run"].count(new) == 2
+        assert problems == []
 
 
 # --- the step scripts themselves, run with bash ------------------------------
