@@ -2001,7 +2001,6 @@ jobs:
           uv pip install --no-sources --force-reinstall --constraint _candidate-constraints.txt "$CANDIDATE"
           # S-126 (B1): see the lint-job block. A plain `uv run` would re-sync to
           # uv.lock and replace this candidate before pytest imports it.
-          echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"
 
       - name: Build pytest arguments
         id: pytest-args
