@@ -226,7 +226,7 @@ on:
 
       # --- Optional retained prebuilt wheels for the listed trusted private repositories ---
       retain_prebuilt_wheels:
-        description: 'Allow setup-uv to retain prebuilt wheels only for the listed trusted private repositories (autom8y-data, autom8y-ads, autom8y-sms, autom8y-scheduling) on private default-branch push or dispatch runs, behind the fail-closed cache scan. Default false.'
+        description: 'Keep prebuilt wheels in the uv cache for the listed trusted private repositories (autom8y-data, autom8y-ads, autom8y-sms, autom8y-scheduling). Every ref may restore the retained cache; only trusted default-branch push/manual runs may save it behind the fail-closed cache scan. Default false.'
         type: boolean
         default: false
 
@@ -874,9 +874,11 @@ jobs:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-          # Default remains pruning. Retention is unavailable to every caller except
-          # the listed trusted private repositories and the default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # Default remains pruning and saving. For the listed private repositories with
+          # the opt-in, every ref keeps wheels and can restore a retained cache, while
+          # only trusted default-branch push/manual runs may save one (after the cache scan).
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) }}
+          save-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) || (inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -1783,9 +1785,11 @@ jobs:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-          # Default remains pruning. Retention is unavailable to every caller except
-          # the listed trusted private repositories and the default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # Default remains pruning and saving. For the listed private repositories with
+          # the opt-in, every ref keeps wheels and can restore a retained cache, while
+          # only trusted default-branch push/manual runs may save one (after the cache scan).
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) }}
+          save-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) || (inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -2411,9 +2415,11 @@ jobs:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-          # Default remains pruning. Retention is unavailable to every caller except
-          # the listed trusted private repositories and the default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # Default remains pruning and saving. For the listed private repositories with
+          # the opt-in, every ref keeps wheels and can restore a retained cache, while
+          # only trusted default-branch push/manual runs may save one (after the cache scan).
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) }}
+          save-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) || (inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -2690,9 +2696,11 @@ jobs:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-          # Default remains pruning. Retention is unavailable to every caller except
-          # the listed trusted private repositories and the default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # Default remains pruning and saving. For the listed private repositories with
+          # the opt-in, every ref keeps wheels and can restore a retained cache, while
+          # only trusted default-branch push/manual runs may save one (after the cache scan).
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) }}
+          save-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) || (inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
@@ -3084,9 +3092,11 @@ jobs:
           version: "0.10.8"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-          # Default remains pruning. Retention is unavailable to every caller except
-          # the listed trusted private repositories and the default-branch event condition.
-          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+          # Default remains pruning and saving. For the listed private repositories with
+          # the opt-in, every ref keeps wheels and can restore a retained cache, while
+          # only trusted default-branch push/manual runs may save one (after the cache scan).
+          prune-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) }}
+          save-cache: ${{ !(inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private) || (inputs.retain_prebuilt_wheels && contains(fromJSON('["autom8y/autom8y-data","autom8y/autom8y-ads","autom8y/autom8y-sms","autom8y/autom8y-scheduling"]'), github.repository) && github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
