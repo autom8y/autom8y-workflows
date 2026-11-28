@@ -1,0 +1,27 @@
+# Broken fixture 4 for tests/test_ci_main_keys_guard.py: a job that names
+# ci-main-keys and mints, with no permissions key at all. A called job with
+# no permissions key inherits the caller's grant, and callers grant
+# id-token: write to the calling job, so the guard treats it as holding
+# id-token and rule 2 must turn red. Never call this file.
+name: "Fixture: an environment job with no permissions key"
+
+on:
+  workflow_call:
+
+jobs:
+  candidate-wheel:
+    name: Candidate wheel
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: ci-main-keys
+    timeout-minutes: 10
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+          permission-actions: read

@@ -1,0 +1,25 @@
+# Broken fixture 1 for tests/test_ci_main_keys_guard.py: a mint inside a
+# pull-request job. The job runs on pull requests, names no environment and
+# mints with the App pair, so guard rule 1 must turn red. Never call this file.
+name: "Fixture: mint in a pull-request job"
+
+on:
+  workflow_call:
+
+jobs:
+  pr-check:
+    name: Pull-request check
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y

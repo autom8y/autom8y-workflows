@@ -1,0 +1,36 @@
+# Broken fixture 3 for tests/test_ci_main_keys_guard.py: a job that names
+# ci-main-keys and mints, and also holds id-token: write with a cloud-role
+# step. Rule 1 holds (the pair sits in the environment), but naming an
+# environment changes the job's OIDC subject, so guard rule 2 must turn red.
+# Never call this file.
+name: "Fixture: an environment job with id-token and a role step"
+
+on:
+  workflow_call:
+
+jobs:
+  candidate-wheel:
+    name: Candidate wheel
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: ci-main-keys
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+          permission-actions: read
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
+          aws-region: us-east-1

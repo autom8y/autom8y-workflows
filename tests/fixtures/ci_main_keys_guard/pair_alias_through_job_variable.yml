@@ -1,0 +1,22 @@
+# Broken fixture 2 for tests/test_ci_main_keys_guard.py: an alias. The job
+# passes the App pair through env entries under other names and signs with
+# them in a run step, with no create-github-app-token step. It names no
+# environment, so guard rule 1 must turn red. Never call this file.
+name: "Fixture: the App pair passed through an env entry"
+
+on:
+  workflow_call:
+
+jobs:
+  signer:
+    name: Signer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      SIGNER_ID: ${{ secrets.APP_ID }}
+      SIGNER_PEM: ${{ secrets.APP_PRIVATE_KEY }}
+    steps:
+      - name: Sign a request with the aliased pair
+        run: ./sign-request.sh "$SIGNER_ID"

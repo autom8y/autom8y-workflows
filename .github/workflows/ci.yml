@@ -126,11 +126,13 @@ jobs:
       # coverage check (every `uv run` after a candidate install keeps the
       # candidate). No uv is needed; the uv end-to-end proof,
       # tests/test_consumer_gate_uv_offline.py, is opt-in and runs offline locally.
+      # Also the ci-main-keys guard: the App pair and a cloud role never share a job.
       - name: Run tests
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==8.4.2 pyyaml==6.0.2
           "$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider \
+            tests/test_ci_main_keys_guard.py \
             tests/test_consumer_gate_candidate.py \
             tests/test_workflow_validation.py::TestConsumerGateCoverage \
             tests/test_workflow_validation.py::TestConsumerGateGuardScript \
