@@ -255,6 +255,18 @@ on:
         default: 'standard'
         required: false
 
+      # --- Optional: runner for the test job only ---
+      # A single runner label as a plain string. At the default (or when empty)
+      # the test job runs exactly as before, on the hosted label that
+      # runner_size selects. Any other value selects the test job's runner and
+      # takes precedence over runner_size. Every other job keeps its own fixed
+      # runner.
+      test_runs_on:
+        description: 'Runner label for the test job only (the sharded suite); every other job keeps its fixed runner. Defaults to the hosted label ubuntu-latest, where runner_size still applies; an empty value means the default. Callers opt in by passing their own repository variable.'
+        type: string
+        default: 'ubuntu-latest'
+        required: false
+
       # --- Retired: governance repository checkout ---
       # Kept defined so that callers which still pass it do not fail.
       governance_repo_root:
@@ -1342,7 +1354,7 @@ jobs:
     # skip required shards, which can satisfy branch protection as skipped.
     if: ${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
-    runs-on: ${{ inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest' }}
+    runs-on: ${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest') && inputs.test_runs_on || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}
     timeout-minutes: ${{ inputs.test_timeout }}
     permissions:
       id-token: write
