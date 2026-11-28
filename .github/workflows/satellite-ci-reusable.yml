@@ -257,7 +257,9 @@ on:
 
       # --- Optional: runner for the test job only ---
       # One runner label as a plain string, or a JSON list of labels (a value
-      # that starts with "[" is read with fromJSON). At the default (or when
+      # that starts with "[" is read with fromJSON, and used as a list only if
+      # its first label is not empty; an empty list stays the literal string,
+      # which matches no runner). At the default (or when
       # empty) the test job runs exactly as before, on the hosted label that
       # runner_size selects. Any other value selects the test job's runner and
       # takes precedence over runner_size. Every other job keeps its own fixed
@@ -1357,7 +1359,7 @@ jobs:
     # skip required shards, which can satisfy branch protection as skipped.
     if: ${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
-    runs-on: ${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest') && (startsWith(inputs.test_runs_on, '[') && fromJSON(inputs.test_runs_on) || inputs.test_runs_on) || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}
+    runs-on: ${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest') && (startsWith(inputs.test_runs_on, '[') && fromJSON(inputs.test_runs_on)[0] && fromJSON(inputs.test_runs_on) || inputs.test_runs_on) || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}
     timeout-minutes: ${{ inputs.test_timeout }}
     permissions:
       id-token: write

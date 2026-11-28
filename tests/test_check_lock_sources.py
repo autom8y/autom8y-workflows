@@ -1588,18 +1588,25 @@ class WorkflowWiring(unittest.TestCase):
         test_job = _job_lines(WORKFLOW, "test")
         self.assertIn("        shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list || '[1]') }}", test_job)
 
+    # The jobs that name the App pair today. A change that adds or removes one updates this set.
+    PAIR_JOBS = ("candidate-wheel", "integration", "spectral-validation", "semantic-score", "trivy-gate")
+
     def test_only_the_test_job_takes_its_runner_from_inputs(self) -> None:
         """Only jobs.test.runs-on reads inputs; a job that names the App pair keeps a literal runs-on."""
-        pair_names = ("APP_ID", "APP_PRIVATE_KEY")
+        pair_names = ("app_id", "app_private_key")  # compared case-insensitively
+        store = "secrets"  # the job-level store of repository values
+        lines = _lines(WORKFLOW)
         pair_jobs = []
-        for name in _job_names(_lines(WORKFLOW)):
+        for name in _job_names(lines):
             with self.subTest(job=name):
                 job = _job_lines(WORKFLOW, name)
                 runs_on = _job_key(job, "runs-on")
                 self.assertEqual(len(runs_on), 1, "one single-line runs-on per job")
-                names_pair = any(n in line for line in job for n in pair_names)
+                names_pair = any(n in line.lower() for line in job for n in pair_names)
                 if name == "test":
                     self.assertIn("inputs.test_runs_on", runs_on[0])
+                    # An empty JSON list, or one whose first label is blank, stays a literal string.
+                    self.assertIn("fromJSON(inputs.test_runs_on)[0] && fromJSON(inputs.test_runs_on)", runs_on[0])
                     self.assertFalse(names_pair, "the input-selectable job must not name the App pair")
                 else:
                     self.assertNotIn("inputs.", runs_on[0])
@@ -1607,7 +1614,21 @@ class WorkflowWiring(unittest.TestCase):
                     pair_jobs.append(name)
                     self.assertNotIn("${{", runs_on[0])
                     self.assertRegex(runs_on[0], r"^[A-Za-z0-9_.-]+$")
-        self.assertTrue(pair_jobs, "must-find control: at least one job names the App pair")
+        folded = "\n".join(lines).lower()
+        with self.subTest(check="no whole-store toJSON"):
+            self.assertIsNone(re.search(r"tojson\(\s*" + store + r"\b", folded))
+        with self.subTest(check="no indexed read of the store"):
+            self.assertIsNone(re.search(r"\b" + store + r"\s*\[", folded))
+        with self.subTest(check="no workflow-level env naming the pair"):
+            top_env, inside = [], False
+            for line in lines:
+                if line and not line[0].isspace() and not line.startswith("#"):
+                    inside = line.startswith("env:")
+                if inside:
+                    top_env.append(line.lower())
+            self.assertFalse([l for l in top_env if any(n in l for n in pair_names)])
+        with self.subTest(check="must-find control, pinned"):
+            self.assertEqual(sorted(pair_jobs), sorted(self.PAIR_JOBS))
 
     def test_standalone_wrapper_has_no_dependents(self) -> None:
         self.assertEqual(_job_names(_lines(WRAPPER)), [_JOB])
