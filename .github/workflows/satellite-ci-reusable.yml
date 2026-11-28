@@ -255,9 +255,10 @@ on:
         default: 'standard'
         required: false
 
-      # --- Optional: Contract/governance test support ---
+      # --- Retired: governance repository checkout ---
+      # Kept defined so that callers which still pass it do not fail.
       governance_repo_root:
-        description: 'Path to checkout autom8y-api-schemas for contract/governance tests (relative to workspace)'
+        description: 'Retired and ignored. The test job no longer checks out a governance repository; when set, the job prints a warning. Remove it from the caller.'
         type: string
         default: ''
 
@@ -374,9 +375,111 @@ jobs:
           LOCK_SOURCES_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
         run: python3 -I .lock-source-canonical/.github/scripts/run_lock_sources.py --canonical .lock-source-canonical --tree github.sha=caller-sha --tree PR-head=caller-pr-head --require-canonical-on-main
 
+  candidate-wheel:
+    # Consumer-gate candidate fetch. The candidate wheel is an artifact of a
+    # run in autom8y/autom8y, and reading it from another repository needs an
+    # App installation token, so this is the only job on the candidate path
+    # that holds the App credentials. It runs no caller code: no checkout, no
+    # setup-uv, no uv. It re-uploads the wheel as an artifact of THIS run, and
+    # lint and test download that artifact without any token input.
+    #
+    # It runs only on a workflow_dispatch at the caller's default branch with
+    # a candidate run id set, and mints only after its inputs check passes.
+    # Everywhere else (every pull request and push) it is skipped, and lint
+    # and test, whose if: starts with !cancelled(), run as before. A
+    # candidate run outside that event and ref finds no artifact, so lint and
+    # test fail at their download step instead of testing the lock.
+    # The comment sits inside the job so that the lock-sources job above stays
+    # identical to its standalone wrapper (tests/test_check_lock_sources.py).
+    name: Candidate wheel (consumer-gate)
+    needs: lock-sources
+    if: ${{ !cancelled() && (inputs.candidate_wheel_run_id != '' && github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+
+    steps:
+      - name: Require lock-sources success
+        env:
+          LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
+        run: |
+          if [ "$LOCK_SOURCES_RESULT" != "success" ]; then
+            echo "::error::lock-sources did not succeed (result: ${LOCK_SOURCES_RESULT}); failing this job instead of skipping it"
+            exit 1
+          fi
+          echo "lock-sources succeeded"
+
+      # Inputs check before any token, with no `if:`. It applies the first
+      # half of the lint and test inputs guard: the four candidate inputs are
+      # set together or not at all, and whitespace counts as empty. With none
+      # set it writes mode=none and the steps below are skipped; with some but
+      # not all set, or a run id that is not numeric, it fails the job. Only
+      # mode=candidate lets the token, the fetch and the upload run.
+      - name: Candidate inputs check (all four or none, before any token)
+        id: candidate-inputs
+        shell: bash
+        env:
+          CONSUMER_GATE_SDK_NAME: ${{ inputs.candidate_sdk_name }}
+          CONSUMER_GATE_SDK_VERSION: ${{ inputs.candidate_sdk_version }}
+          CONSUMER_GATE_WHEEL_RUN_ID: ${{ inputs.candidate_wheel_run_id }}
+          CONSUMER_GATE_CORRELATION_ID: ${{ inputs.dispatch_correlation_id }}
+        run: |
+          set -euo pipefail
+          SET_COUNT=0
+          for VALUE in "$CONSUMER_GATE_SDK_NAME" "$CONSUMER_GATE_SDK_VERSION" "$CONSUMER_GATE_WHEEL_RUN_ID" "$CONSUMER_GATE_CORRELATION_ID"; do
+            if [ -n "${VALUE//[[:space:]]/}" ]; then
+              SET_COUNT=$((SET_COUNT + 1))
+            fi
+          done
+          if [ "$SET_COUNT" -eq 0 ]; then
+            echo "consumer-gate inputs: none set; no candidate to fetch"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SET_COUNT" -ne 4 ]; then
+            echo "::error::consumer-gate inputs: ${SET_COUNT} of 4 set. candidate_sdk_name, candidate_sdk_version, candidate_wheel_run_id and dispatch_correlation_id are set together or not at all (whitespace counts as empty)"
+            exit 1
+          fi
+          if ! [[ "$CONSUMER_GATE_WHEEL_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::consumer-gate inputs: candidate_wheel_run_id is not a numeric workflow run id"
+            exit 1
+          fi
+          echo "mode=candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Generate App token for cross-repo artifact download (consumer-gate)
+        id: cross-repo-app-token
+        if: steps.candidate-inputs.outputs.mode == 'candidate'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: autom8y
+          repositories: autom8y
+          permission-actions: read
+
+      - name: Download candidate SDK wheel from the publish run (consumer-gate)
+        if: steps.candidate-inputs.outputs.mode == 'candidate'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
+        with:
+          name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
+          path: _candidate-wheel
+          repository: autom8y/autom8y
+          run-id: ${{ inputs.candidate_wheel_run_id }}
+          github-token: ${{ steps.cross-repo-app-token.outputs.token }}
+
+      - name: Upload candidate SDK wheel to this run (consumer-gate)
+        if: steps.candidate-inputs.outputs.mode == 'candidate'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        with:
+          name: consumer-gate-candidate
+          path: _candidate-wheel
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
   lint:
     name: Lint & Type Check
-    needs: lock-sources
+    needs: [lock-sources, candidate-wheel]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -933,41 +1036,22 @@ jobs:
 
       # sdk-contract-governance Sprint 3 + WS-alpha (2026-04-14): when invoked
       # by the consumer-gate the satellite must run its existing tests against
-      # a CANDIDATE SDK wheel, not the registry version. We download the wheel
-      # from the parent workflow run (autom8y/sdk-publish-v2.yml's
-      # consumer-gate job) and force-reinstall it into the venv.
+      # a CANDIDATE SDK wheel, not the registry version. The wheel comes from
+      # the candidate-wheel job of THIS run, which fetches it from the parent
+      # workflow run (autom8y/sdk-publish-v2.yml's consumer-gate job) and
+      # uploads it here as the consumer-gate-candidate artifact. This job
+      # downloads that same-run artifact, with no token input, and
+      # force-reinstalls it into the venv.
       #
-      # Cross-repo artifact auth requirement: actions/download-artifact@v4
-      # requires a token with actions:read on the SOURCE repo when
-      # `repository:` is set to a different repo than the runner's
-      # github.repository. The default GITHUB_TOKEN is scoped only to the
-      # satellite repo (issuer of the workflow run) and cannot read artifacts
-      # from autom8y/autom8y -- this manifests as "Not Found" (a
-      # permission-denied masquerading as 404). We mint a short-lived
-      # GitHub App installation token with owner:autom8y repositories:autom8y
-      # so the App's actions:read permission on that install scope authorizes
-      # the cross-repo download. The App (APP_ID/APP_PRIVATE_KEY) is
-      # already used elsewhere in this reusable workflow (integration,
-      # convention-check, contract-tests jobs).
-      - name: Generate App token for cross-repo artifact download (consumer-gate)
-        id: cross-repo-app-token
-        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: autom8y
-
+      # The cross-repository fetch needs an App installation token with
+      # actions:read on autom8y/autom8y. That token is minted only in the
+      # candidate-wheel job, which runs no caller code; this job holds none.
       - name: Download candidate SDK wheel (consumer-gate)
         if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
-          name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
+          name: consumer-gate-candidate
           path: _candidate-wheel
-          repository: autom8y/autom8y
-          run-id: ${{ inputs.candidate_wheel_run_id }}
-          github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
         if: steps.consumer-gate-guard.outputs.mode == 'candidate'
@@ -1253,7 +1337,7 @@ jobs:
           echo "Resolved shard list for test_splits=${TEST_SPLITS}: ${LIST}"
 
   test:
-    needs: [matrix-prep, lint, lock-sources]
+    needs: [matrix-prep, lint, lock-sources, candidate-wheel]
     # Keep shard checks running and failing on lint failure. A bare dependency would
     # skip required shards, which can satisfy branch protection as skipped.
     if: ${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}
@@ -1751,34 +1835,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Generate App token for governance repo checkout
-        id: governance-app-token
-        if: inputs.governance_repo_root != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: autom8y-api-schemas
-
-      - name: Checkout governance repo (contract tests)
-        if: inputs.governance_repo_root != ''
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
-        with:
-          repository: autom8y/autom8y-api-schemas
-          path: ${{ inputs.governance_repo_root }}
-          token: ${{ steps.governance-app-token.outputs.token }}
-          sparse-checkout: |
-            .ledge/
-            src/
-            tests/contracts/
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Set GOVERNANCE_REPO_ROOT
+      # governance_repo_root is retired: this job no longer checks out a second
+      # repository. The input stays defined so that callers which still pass it
+      # keep working; this step tells them to remove it. It also points
+      # GOVERNANCE_REPO_ROOT at a path under RUNNER_TEMP that is never created,
+      # so any remaining reader of the variable fails loudly instead of
+      # resolving some other root on its own.
+      - name: governance_repo_root is retired and ignored
         if: inputs.governance_repo_root != ''
         run: |
-          echo "GOVERNANCE_REPO_ROOT=${{ github.workspace }}/${{ inputs.governance_repo_root }}" >> $GITHUB_ENV
+          echo "::warning title=governance_repo_root is retired::The governance_repo_root input is retired and ignored. Remove it from the calling workflow."
+          echo "GOVERNANCE_REPO_ROOT=${RUNNER_TEMP}/governance-repo-root-retired-not-created" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
@@ -1943,26 +2010,13 @@ jobs:
         run: uv sync --no-sources ${{ inputs.test_extras }}
 
       # sdk-contract-governance Sprint 3 + WS-alpha (2026-04-14):
-      # see lint job for full rationale on the App-token auth path.
-      - name: Generate App token for cross-repo artifact download (consumer-gate)
-        id: cross-repo-app-token
-        if: steps.consumer-gate-guard.outputs.mode == 'candidate'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: autom8y
-
+      # the candidate-wheel job fetches the wheel; see the lint job's comment.
       - name: Download candidate SDK wheel (consumer-gate)
         if: steps.consumer-gate-guard.outputs.mode == 'candidate'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
-          name: consumer-gate-wheel-${{ inputs.candidate_sdk_name }}-${{ github.event.repository.name }}
+          name: consumer-gate-candidate
           path: _candidate-wheel
-          repository: autom8y/autom8y
-          run-id: ${{ inputs.candidate_wheel_run_id }}
-          github-token: ${{ steps.cross-repo-app-token.outputs.token }}
 
       - name: Force-install candidate SDK wheel (consumer-gate)
         if: steps.consumer-gate-guard.outputs.mode == 'candidate'
