@@ -256,13 +256,16 @@ on:
         required: false
 
       # --- Optional: runner for the test job only ---
-      # A single runner label as a plain string. At the default (or when empty)
-      # the test job runs exactly as before, on the hosted label that
+      # One runner label as a plain string, or a JSON list of labels (a value
+      # that starts with "[" is read with fromJSON). At the default (or when
+      # empty) the test job runs exactly as before, on the hosted label that
       # runner_size selects. Any other value selects the test job's runner and
       # takes precedence over runner_size. Every other job keeps its own fixed
-      # runner.
+      # runner (tests/test_check_lock_sources.py checks this). The value comes
+      # from the caller's own repository variable; this file names no runner
+      # label other than the hosted defaults.
       test_runs_on:
-        description: 'Runner label for the test job only (the sharded suite); every other job keeps its fixed runner. Defaults to the hosted label ubuntu-latest, where runner_size still applies; an empty value means the default. Callers opt in by passing their own repository variable.'
+        description: 'Runner for the test job only (the sharded suite): one label, or a JSON list of labels (a value starting with "["); every other job keeps its fixed runner. Defaults to the hosted label ubuntu-latest, where runner_size still applies; an empty value means the default. Callers opt in by passing their own repository variable; no other runner label is named in this file.'
         type: string
         default: 'ubuntu-latest'
         required: false
@@ -1354,7 +1357,7 @@ jobs:
     # skip required shards, which can satisfy branch protection as skipped.
     if: ${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}
     name: Test${{ inputs.test_splits > 1 && format(' (shard {0}/{1})', matrix.shard, inputs.test_splits) || '' }}
-    runs-on: ${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest') && inputs.test_runs_on || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}
+    runs-on: ${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest') && (startsWith(inputs.test_runs_on, '[') && fromJSON(inputs.test_runs_on) || inputs.test_runs_on) || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}
     timeout-minutes: ${{ inputs.test_timeout }}
     permissions:
       id-token: write

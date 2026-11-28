@@ -1588,6 +1588,27 @@ class WorkflowWiring(unittest.TestCase):
         test_job = _job_lines(WORKFLOW, "test")
         self.assertIn("        shard: ${{ fromJson(needs.matrix-prep.outputs.shard_list || '[1]') }}", test_job)
 
+    def test_only_the_test_job_takes_its_runner_from_inputs(self) -> None:
+        """Only jobs.test.runs-on reads inputs; a job that names the App pair keeps a literal runs-on."""
+        pair_names = ("APP_ID", "APP_PRIVATE_KEY")
+        pair_jobs = []
+        for name in _job_names(_lines(WORKFLOW)):
+            with self.subTest(job=name):
+                job = _job_lines(WORKFLOW, name)
+                runs_on = _job_key(job, "runs-on")
+                self.assertEqual(len(runs_on), 1, "one single-line runs-on per job")
+                names_pair = any(n in line for line in job for n in pair_names)
+                if name == "test":
+                    self.assertIn("inputs.test_runs_on", runs_on[0])
+                    self.assertFalse(names_pair, "the input-selectable job must not name the App pair")
+                else:
+                    self.assertNotIn("inputs.", runs_on[0])
+                if names_pair:
+                    pair_jobs.append(name)
+                    self.assertNotIn("${{", runs_on[0])
+                    self.assertRegex(runs_on[0], r"^[A-Za-z0-9_.-]+$")
+        self.assertTrue(pair_jobs, "must-find control: at least one job names the App pair")
+
     def test_standalone_wrapper_has_no_dependents(self) -> None:
         self.assertEqual(_job_names(_lines(WRAPPER)), [_JOB])
         self.assertNotIn(GUARD_NAME, WRAPPER.read_text(encoding="utf-8"))
