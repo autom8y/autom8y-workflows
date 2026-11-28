@@ -1591,11 +1591,25 @@ class WorkflowWiring(unittest.TestCase):
     # The jobs that name the App pair today. A change that adds or removes one updates this set.
     PAIR_JOBS = ("candidate-wheel", "integration", "spectral-validation", "semantic-score", "trivy-gate")
 
+    # The test job's whole runs-on. An empty JSON list, or one whose first label is empty,
+    # stays a literal string: the [0] guard sits before "|| inputs.test_runs_on".
+    TEST_RUNS_ON = (
+        "${{ (inputs.test_runs_on != '' && inputs.test_runs_on != 'ubuntu-latest')"
+        " && (startsWith(inputs.test_runs_on, '[') && fromJSON(inputs.test_runs_on)[0]"
+        " && fromJSON(inputs.test_runs_on) || inputs.test_runs_on)"
+        " || (inputs.runner_size == 'large' && 'ubuntu-latest-large' || 'ubuntu-latest') }}"
+    )
+
     def test_only_the_test_job_takes_its_runner_from_inputs(self) -> None:
         """Only jobs.test.runs-on reads inputs; a job that names the App pair keeps a literal runs-on."""
         pair_names = ("app_id", "app_private_key")  # compared case-insensitively
         store = "secrets"  # the job-level store of repository values
         lines = _lines(WORKFLOW)
+        test_job = _job_lines(WORKFLOW, "test")
+        with self.subTest(check="test runs-on is the pinned expression"):
+            self.assertEqual(_job_key(test_job, "runs-on"), [self.TEST_RUNS_ON])
+        with self.subTest(check="no store reference in the test job"):
+            self.assertEqual([l for l in test_job if re.search(r"\b" + store + r"\b", l.lower())], [])
         pair_jobs = []
         for name in _job_names(lines):
             with self.subTest(job=name):
@@ -1604,9 +1618,6 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(len(runs_on), 1, "one single-line runs-on per job")
                 names_pair = any(n in line.lower() for line in job for n in pair_names)
                 if name == "test":
-                    self.assertIn("inputs.test_runs_on", runs_on[0])
-                    # An empty JSON list, or one whose first label is blank, stays a literal string.
-                    self.assertIn("fromJSON(inputs.test_runs_on)[0] && fromJSON(inputs.test_runs_on)", runs_on[0])
                     self.assertFalse(names_pair, "the input-selectable job must not name the App pair")
                 else:
                     self.assertNotIn("inputs.", runs_on[0])
@@ -1619,6 +1630,8 @@ class WorkflowWiring(unittest.TestCase):
             self.assertIsNone(re.search(r"tojson\(\s*" + store + r"\b", folded))
         with self.subTest(check="no indexed read of the store"):
             self.assertIsNone(re.search(r"\b" + store + r"\s*\[", folded))
+        with self.subTest(check="no object filter on the store"):
+            self.assertIsNone(re.search(r"\b" + store + r"\s*\.\s*\*", folded))
         with self.subTest(check="no workflow-level env naming the pair"):
             top_env, inside = [], False
             for line in lines:
