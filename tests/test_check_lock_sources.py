@@ -1406,6 +1406,10 @@ _CANONICAL_REF = {
 # B-2: every dependent's if:, as !cancelled() plus its condition at origin/main (verbatim,
 # parenthesized), plus a lock-sources escape where other needs used to gate it.
 EXPECTED_DEPENDENT_IFS = {
+    "candidate-wheel": (
+        "${{ !cancelled() && (inputs.candidate_wheel_run_id != '' && github.event_name == 'workflow_dispatch'"
+        " && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}"
+    ),
     "lint": "${{ !cancelled() }}",
     "matrix-prep": "${{ !cancelled() }}",
     "test": "${{ !cancelled() && (needs.matrix-prep.result == 'success' || needs.lock-sources.result != 'success') }}",
@@ -1421,6 +1425,9 @@ EXPECTED_DEPENDENT_IFS = {
     "conformance-gate": "${{ !cancelled() && (inputs.conformance_gate) }}",
     "trivy-gate": "${{ !cancelled() && (github.event_name == 'pull_request') }}",
 }
+# (job, need) pairs where the need only orders the job: the job's if: never reads that need
+# in any form, so a skipped need cannot skip the job, and no lock-sources escape is owed for it.
+ORDERING_ONLY = {("lint", "candidate-wheel")}
 GUARD_NAME = "      - name: Require lock-sources success"
 GUARD_RUN = (
     'if [ "$LOCK_SOURCES_RESULT" != "success" ]; then\n'
@@ -1536,7 +1543,15 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertTrue(expected.startswith("${{ !cancelled()"))
                 self.assertNotIn("needs.lock-sources.result == 'success'", expected)  # that would skip
                 others = [n for n in _job_needs(job) if n != _JOB]
-                if others:
+                for job_name, need in ORDERING_ONLY:
+                    if job_name != name:
+                        continue
+                    self.assertIn(need, others)  # a stale allowlist entry fails here
+                    folded = expected.lower()
+                    for form in (f"needs.{need}", f"needs['{need}']", f'needs["{need}"]', "needs.*", "tojson(needs"):
+                        self.assertNotIn(form.lower(), folded)
+                gating = [n for n in others if (name, n) not in ORDERING_ONLY]
+                if gating:
                     # Other needs still gate as before, EXCEPT when lock-sources did not succeed.
                     self.assertIn("needs.lock-sources.result != 'success'", expected)
 
