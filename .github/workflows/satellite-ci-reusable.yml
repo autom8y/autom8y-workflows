@@ -14,16 +14,25 @@
 #       with:
 #         mypy_targets: 'src/autom8_asana'
 #         coverage_package: 'autom8_asana'
-#       secrets: inherit
+#       # No secrets block: candidate-wheel reads the App pair from the
+#       # caller repository's ci-main-keys environment, and no other job needs it.
 #
 # NOTE: The permissions block is REQUIRED. Without it, GitHub Actions inherits
 # the org default (read-only), which blocks OIDC token generation and causes
 # all jobs to fail with startup_failure (0 jobs created).
 #
-# AWS roles (S-122 S2): lint, test, convention-check and spec-check assume
+# AWS roles (S-122 S2): lint, test, convention-check, spec-check,
+# spectral-validation, semantic-score and trivy-gate assume
 # github-actions-ci-read, which trusts only the pull_request and main-branch
 # subjects and grants a CodeArtifact read token plus one S3 object. Only the
 # integration job still assumes github-actions-deploy (see its comment).
+#
+# The App pair and the environment subject: one job, candidate-wheel, reads
+# the App pair. It is the only job that names the environment ci-main-keys,
+# and it holds no id-token and assumes no cloud role. No job that assumes a
+# role names an environment, so each keeps today's OIDC subject form and no
+# role's trust has to change. tests/test_ci_main_keys_guard.py checks both
+# rules for every job of every reusable workflow in this repository.
 
 name: Satellite CI
 
@@ -389,13 +398,29 @@ jobs:
     # and test, whose if: starts with !cancelled(), run as before. A
     # candidate run outside that event and ref finds no artifact, so lint and
     # test fail at their download step instead of testing the lock.
+    #
+    # It is the only job in this workflow that reads the App pair, and the
+    # only one that names the environment ci-main-keys. The pair lives in that
+    # environment of the caller repository, whose deployment branches are
+    # limited to main (H-21), so a run from any other ref cannot enter this
+    # job; the job if above is a seatbelt, not the wall. Naming an environment
+    # changes a job's OIDC subject to the environment form, so this job holds
+    # no id-token and has no cloud-role step, and it must never gain either.
+    # Work that needs both the pair and a role splits into a key job like
+    # this one and a role job with no environment, joined by needs; only
+    # fetched content or non-key strings cross, never the pair or a minted
+    # token. tests/test_ci_main_keys_guard.py enforces this.
     # The comment sits inside the job so that the lock-sources job above stays
     # identical to its standalone wrapper (tests/test_check_lock_sources.py).
     name: Candidate wheel (consumer-gate)
     needs: lock-sources
     if: ${{ !cancelled() && (inputs.candidate_wheel_run_id != '' && github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-latest
+    environment: ci-main-keys
     timeout-minutes: 10
+    # Empty: never the id-token permission, and no configure-aws step. The
+    # same-run upload uses the runner's own token (UV-P-A1); if it needs a
+    # permission after all, the fallback is contents: read, never id-token.
     permissions: {}
 
     steps:
@@ -2450,18 +2475,10 @@ jobs:
           fi
           echo "lock-sources succeeded"
 
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: ${{ github.event.repository.name }}
-
+      # This job checks out only its own repository, so the default token
+      # serves; it holds no App token.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
-          token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -2485,10 +2502,16 @@ jobs:
         with:
           # Integration stays on github-actions-deploy (S-122 S2): its pytest run
           # holds these credentials and may reach live AWS beyond CodeArtifact, which
-          # github-actions-ci-read does not grant. The satellite callers turn
-          # run_integration on for push events only (the input defaults to false);
-          # once deploy drops pull_request (S3), a PR that turns it on fails closed
-          # here.
+          # github-actions-ci-read does not grant.
+          # This job names NO environment: under one, its OIDC subject would take
+          # the environment form instead of today's, which deploy's trust would
+          # have to be changed to admit.
+          # This job has no main-only check of its own: its if tests only
+          # inputs.run_integration, with no event or ref check. The satellite
+          # callers turn run_integration on for push events only (the input
+          # defaults to false), and deploy's trust still admits pull_request until
+          # S3. So until S3 a pull request that turns the input on reaches this
+          # role; once deploy drops pull_request, it fails closed here.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
           aws-region: us-east-1
 
@@ -3034,6 +3057,12 @@ jobs:
               sys.exit(main())
           PYTHON
 
+  # The fleet ruleset comes from the latest published autom8y-api-schemas
+  # wheel (package data under autom8y_api_schemas/_fleet/spectral/), read
+  # through github-actions-ci-read; the step summary names the version and the
+  # wheel's sha256. This job names NO environment: it assumes ci-read and runs
+  # on pull requests, and an environment would change its OIDC subject. It
+  # holds no App token.
   spectral-validation:
     name: Spectral Fleet Validation
     needs: lock-sources
@@ -3041,6 +3070,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write    # OIDC for github-actions-ci-read only
     timeout-minutes: 5
 
     steps:
@@ -3058,28 +3088,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: autom8y-api-schemas
-
-      - name: Fetch fleet ruleset
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
-        with:
-          repository: autom8y/autom8y-api-schemas
-          ref: main
-          path: .fleet-schemas
-          token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: |
-            spectral-fleet.yaml
-            spectral-functions/
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
       - name: Install Spectral CLI
         # spectral-cli is version-pinned (6.15.0) but its @stoplight/spectral-*
         # transitives float. @stoplight/spectral-rulesets@1.22.3 (2026-05-21)
@@ -3091,7 +3099,17 @@ jobs:
         # `overrides` package.json and install locally; the lint step resolves
         # `spectral` from node_modules/.bin (added to PATH). Bump the pin when a
         # fixed spectral-rulesets ships.
+        # The install runs under RUNNER_TEMP, not in the caller's checkout, with
+        # package scripts off and a fixed empty user config. So a pull request's
+        # .npmrc, package.json or lockfile cannot steer it, and no install
+        # script runs; the ruleset is unpacked only after this step.
         run: |
+          set -euo pipefail
+          SPECTRAL_DIR="$RUNNER_TEMP/spectral-runner"
+          rm -rf "$SPECTRAL_DIR"
+          mkdir -p "$SPECTRAL_DIR"
+          cd "$SPECTRAL_DIR"
+          : > npm-userconfig
           cat > package.json <<'JSON'
           {
             "name": "spectral-runner",
@@ -3101,16 +3119,115 @@ jobs:
             "overrides": { "@stoplight/spectral-rulesets": "1.22.2" }
           }
           JSON
-          npm install --no-audit --no-fund
-          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+          npm install --no-audit --no-fund --ignore-scripts --userconfig "$SPECTRAL_DIR/npm-userconfig"
+          echo "$SPECTRAL_DIR/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
+          aws-region: us-east-1
+
+      # The CodeArtifact token is fetched and used inside this one step (never
+      # a step output). Exactly one wheel is downloaded, with no dependencies,
+      # and only the members under FLEET_MEMBERS are unpacked, under
+      # RUNNER_TEMP, outside the caller's checkout. The token loop is the test
+      # job's.
+      - name: Fetch fleet ruleset from the autom8y-api-schemas wheel
+        env:
+          CODEARTIFACT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          FLEET_PACKAGE: autom8y-api-schemas
+          FLEET_MEMBERS: autom8y_api_schemas/_fleet/spectral/
+          FLEET_DEST: ${{ runner.temp }}/fleet-schemas
+        run: |
+          set -euo pipefail
+          rm -rf "$FLEET_DEST"
+          cd "$RUNNER_TEMP"
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          rm -rf fleet-wheel
+          mkdir fleet-wheel
+          python3 -I -m pip download --isolated --quiet --disable-pip-version-check --no-cache-dir \
+            --no-deps --only-binary=:all: --dest fleet-wheel \
+            --index-url "https://aws:${TOKEN}@autom8y-${CODEARTIFACT_ACCOUNT}.d.codeartifact.us-east-1.amazonaws.com/pypi/autom8y-python/simple/" \
+            "$FLEET_PACKAGE"
+          TOKEN=""
+          python3 -I - fleet-wheel "$FLEET_PACKAGE" "$FLEET_MEMBERS" "$FLEET_DEST" <<'PYTHON'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          wheel_dir, package, members, dest = sys.argv[1:5]
+
+
+          def fail(message):
+              print(f"::error title=Fleet input::{message}", flush=True)
+              sys.exit(1)
+
+
+          dist = package.replace("-", "_")
+          found = sorted(Path(wheel_dir).iterdir())
+          if len(found) != 1 or not found[0].name.startswith(dist + "-") or not found[0].name.endswith(".whl"):
+              fail(f"expected exactly one {dist} wheel, found {len(found)} files")
+          wheel = found[0]
+          version = wheel.name.split("-")[1]
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          written = 0
+          with zipfile.ZipFile(wheel) as archive:
+              for info in archive.infolist():
+                  if info.is_dir() or not info.filename.startswith(members):
+                      continue
+                  relative = PurePosixPath(info.filename[len(members):])
+                  if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                      fail(f"unsafe member path in {wheel.name}")
+                  target = Path(dest).joinpath(*relative.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(info))
+                  written += 1
+          if written == 0:
+              fail(f"{wheel.name} holds no file under {members}")
+          print(f"{package} {version}, wheel sha256 {digest}: {written} files unpacked from {members}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  f"### Fleet input: {package}\n\n"
+                  "| Package | Version | Wheel sha256 | Files |\n|---|---|---|---|\n"
+                  f"| {package} | {version} | {digest} | {written} |\n"
+              )
+          PYTHON
 
       - name: Lint OpenAPI spec
+        env:
+          FLEET_RULESET: ${{ runner.temp }}/fleet-schemas/spectral-fleet.yaml
         run: |
           if [ ! -f "${{ inputs.openapi_spec_path }}" ]; then
             echo "::error::OpenAPI spec not found at ${{ inputs.openapi_spec_path }}"
             exit 1
           fi
-          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset .fleet-schemas/spectral-fleet.yaml --fail-severity=error
+          spectral lint "${{ inputs.openapi_spec_path }}" --ruleset "$FLEET_RULESET" --fail-severity=error
 
   spec-check:
     name: OpenAPI Spec Drift
@@ -3347,6 +3464,12 @@ jobs:
               sys.exit(main())
           PYTHON
 
+  # The scorer comes from the latest published autom8y-api-schemas wheel
+  # (autom8y_api_schemas/governance/semantic_score/score_spec.py), read
+  # through github-actions-ci-read and run by file path, with no package
+  # import; the step summary names the version and the wheel's sha256. This
+  # job names NO environment: it assumes ci-read and runs on pull requests,
+  # and an environment would change its OIDC subject. It holds no App token.
   semantic-score:
     name: Semantic Score Gate
     needs: lock-sources
@@ -3355,6 +3478,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      id-token: write    # OIDC for github-actions-ci-read only
 
     steps:
       - name: Require lock-sources success
@@ -3371,35 +3495,109 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: a8
-
-      - name: Fetch canonical semantic-score
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
-        with:
-          repository: autom8y/a8
-          ref: main
-          path: .tools-checkout
-          token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: tools/semantic-score/score_spec.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
         with:
           python-version: ${{ inputs.python_version }}
 
-      - name: Run semantic score gate
-        id: score
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
+          aws-region: us-east-1
+
+      # The CodeArtifact token is fetched and used inside this one step (never
+      # a step output). Exactly one wheel is downloaded, with no dependencies,
+      # and only the members under FLEET_MEMBERS are unpacked, under
+      # RUNNER_TEMP, outside the caller's checkout. The token loop is the test
+      # job's.
+      - name: Fetch semantic-score from the autom8y-api-schemas wheel
+        env:
+          CODEARTIFACT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          FLEET_PACKAGE: autom8y-api-schemas
+          FLEET_MEMBERS: autom8y_api_schemas/governance/semantic_score/
+          FLEET_DEST: ${{ runner.temp }}/semantic-score
         run: |
           set -euo pipefail
-          python .tools-checkout/tools/semantic-score/score_spec.py \
+          rm -rf "$FLEET_DEST"
+          cd "$RUNNER_TEMP"
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          rm -rf fleet-wheel
+          mkdir fleet-wheel
+          python3 -I -m pip download --isolated --quiet --disable-pip-version-check --no-cache-dir \
+            --no-deps --only-binary=:all: --dest fleet-wheel \
+            --index-url "https://aws:${TOKEN}@autom8y-${CODEARTIFACT_ACCOUNT}.d.codeartifact.us-east-1.amazonaws.com/pypi/autom8y-python/simple/" \
+            "$FLEET_PACKAGE"
+          TOKEN=""
+          python3 -I - fleet-wheel "$FLEET_PACKAGE" "$FLEET_MEMBERS" "$FLEET_DEST" <<'PYTHON'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          wheel_dir, package, members, dest = sys.argv[1:5]
+
+
+          def fail(message):
+              print(f"::error title=Fleet input::{message}", flush=True)
+              sys.exit(1)
+
+
+          dist = package.replace("-", "_")
+          found = sorted(Path(wheel_dir).iterdir())
+          if len(found) != 1 or not found[0].name.startswith(dist + "-") or not found[0].name.endswith(".whl"):
+              fail(f"expected exactly one {dist} wheel, found {len(found)} files")
+          wheel = found[0]
+          version = wheel.name.split("-")[1]
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          written = 0
+          with zipfile.ZipFile(wheel) as archive:
+              for info in archive.infolist():
+                  if info.is_dir() or not info.filename.startswith(members):
+                      continue
+                  relative = PurePosixPath(info.filename[len(members):])
+                  if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                      fail(f"unsafe member path in {wheel.name}")
+                  target = Path(dest).joinpath(*relative.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(info))
+                  written += 1
+          if written == 0:
+              fail(f"{wheel.name} holds no file under {members}")
+          print(f"{package} {version}, wheel sha256 {digest}: {written} files unpacked from {members}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  f"### Fleet input: {package}\n\n"
+                  "| Package | Version | Wheel sha256 | Files |\n|---|---|---|---|\n"
+                  f"| {package} | {version} | {digest} | {written} |\n"
+              )
+          PYTHON
+
+      - name: Run semantic score gate
+        id: score
+        env:
+          SCORE_SPEC: ${{ runner.temp }}/semantic-score/score_spec.py
+        run: |
+          set -euo pipefail
+          python "$SCORE_SPEC" \
             ${{ inputs.openapi_spec_path }} \
             --baseline ${{ inputs.semantic_score_baseline }} \
             | tee /tmp/score-result.json
@@ -3516,12 +3714,20 @@ jobs:
   #
   # Same policy as the build gate: trivy-action v0.35.0 (Trivy v0.69.3),
   # severity CRITICAL, exit-code 1, vuln-type os,library, format table, and the
-  # monorepo ignore file fetched from autom8y/autom8y. Exemptions therefore
-  # go through one file for both gates.
+  # monorepo ignore file. Exemptions therefore go through one file for both
+  # gates. This job reads that file from the latest autom8y-security-policy
+  # wheel, which monorepo main publishes to CodeArtifact, so it lags the
+  # monorepo by one publish; the step summary names the version and the
+  # wheel's sha256. There is no input to pick another version.
   #
-  # Ignore file: `.trivyignore.yaml` if the monorepo has it, else the plain
+  # Ignore file: `.trivyignore.yaml` if the wheel has it, else the plain
   # `.trivyignore`. Exactly one is passed; trivy-action rejects a mix of YAML
   # and plain files. The job fails if neither can be fetched.
+  #
+  # This job assumes github-actions-ci-read and names NO environment. It runs
+  # only on pull_request, so a main-only environment would refuse every run,
+  # and an environment would also change its OIDC subject. It holds no App
+  # token.
   #
   # Scan target: this workflow builds no image, so the job scans a staging
   # directory that holds only the satellite's uv.lock and pyproject.toml
@@ -3543,11 +3749,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      id-token: write    # OIDC for github-actions-ci-read only
 
     steps:
-      # autom8y/autom8y is private; the caller's GITHUB_TOKEN cannot read it.
-      # Same App-token pattern as the consumer-gate cross-repo download above,
-      # narrowed to contents:read on the one repository it reads.
       - name: Require lock-sources success
         env:
           LOCK_SOURCES_RESULT: ${{ needs.lock-sources.result }}
@@ -3558,31 +3762,106 @@ jobs:
           fi
           echo "lock-sources succeeded"
 
-      - name: Generate App token for monorepo security policy
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (node24)
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: autom8y
-          repositories: autom8y
-          permission-contents: read
-
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
         with:
           persist-credentials: false
 
-      - name: Fetch security policy from monorepo
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (node24)
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0 (node24)
         with:
-          repository: autom8y/autom8y
-          token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: |
-            .trivyignore.yaml
-            .trivyignore
-          sparse-checkout-cone-mode: false
-          path: _monorepo_policy
-          persist-credentials: false
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0 (node24)
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-ci-read
+          aws-region: us-east-1
+
+      # The CodeArtifact token is fetched and used inside this one step (never
+      # a step output). Exactly one wheel is downloaded, with no dependencies,
+      # and only the members under FLEET_MEMBERS are unpacked. FLEET_DEST is
+      # removed first, so nothing the pull request planted at that path is read.
+      # The token loop is the test job's.
+      - name: Fetch security policy from the autom8y-security-policy wheel
+        env:
+          CODEARTIFACT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          FLEET_PACKAGE: autom8y-security-policy
+          FLEET_MEMBERS: autom8y_security_policy/
+          FLEET_DEST: ${{ github.workspace }}/_monorepo_policy
+        run: |
+          set -euo pipefail
+          rm -rf "$FLEET_DEST"
+          cd "$RUNNER_TEMP"
+          TOKEN=""
+          for attempt in 1 2 3; do
+            if TOKEN=$(aws codeartifact get-authorization-token \
+              --domain autom8y \
+              --query authorizationToken \
+              --output text \
+              --cli-connect-timeout 15 \
+              --cli-read-timeout 30) && [ -n "$TOKEN" ]; then
+              break
+            fi
+            echo "::warning::CodeArtifact get-authorization-token attempt ${attempt}/3 failed (connect/read timeout or empty token) — retrying in 5s"
+            TOKEN=""
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CodeArtifact get-authorization-token FAILED after 3 attempts — CodeArtifact unreachable or token empty"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          rm -rf fleet-wheel
+          mkdir fleet-wheel
+          python3 -I -m pip download --isolated --quiet --disable-pip-version-check --no-cache-dir \
+            --no-deps --only-binary=:all: --dest fleet-wheel \
+            --index-url "https://aws:${TOKEN}@autom8y-${CODEARTIFACT_ACCOUNT}.d.codeartifact.us-east-1.amazonaws.com/pypi/autom8y-python/simple/" \
+            "$FLEET_PACKAGE"
+          TOKEN=""
+          python3 -I - fleet-wheel "$FLEET_PACKAGE" "$FLEET_MEMBERS" "$FLEET_DEST" <<'PYTHON'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          wheel_dir, package, members, dest = sys.argv[1:5]
+
+
+          def fail(message):
+              print(f"::error title=Fleet input::{message}", flush=True)
+              sys.exit(1)
+
+
+          dist = package.replace("-", "_")
+          found = sorted(Path(wheel_dir).iterdir())
+          if len(found) != 1 or not found[0].name.startswith(dist + "-") or not found[0].name.endswith(".whl"):
+              fail(f"expected exactly one {dist} wheel, found {len(found)} files")
+          wheel = found[0]
+          version = wheel.name.split("-")[1]
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          written = 0
+          with zipfile.ZipFile(wheel) as archive:
+              for info in archive.infolist():
+                  if info.is_dir() or not info.filename.startswith(members):
+                      continue
+                  relative = PurePosixPath(info.filename[len(members):])
+                  if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                      fail(f"unsafe member path in {wheel.name}")
+                  target = Path(dest).joinpath(*relative.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(info))
+                  written += 1
+          if written == 0:
+              fail(f"{wheel.name} holds no file under {members}")
+          print(f"{package} {version}, wheel sha256 {digest}: {written} files unpacked from {members}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  f"### Fleet input: {package}\n\n"
+                  "| Package | Version | Wheel sha256 | Files |\n|---|---|---|---|\n"
+                  f"| {package} | {version} | {digest} | {written} |\n"
+              )
+          PYTHON
 
       # Prefer the YAML ignore file; fall back to the plain one only if the
       # YAML is absent. Never select both.
